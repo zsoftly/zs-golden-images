@@ -1,0 +1,13 @@
+---
+base_packages:
+  - cloud-init
+  - qemu-guest-agent
+  - openssh-server
+  - python3
+  - sudo
+  - ca-certificates
+  - chrony
+  - curl
+  - iproute2
+  - iputils-ping
+  - dnsutils

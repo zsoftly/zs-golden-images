@@ -1,0 +1,82 @@
+---
+- name: Install shared image packages without starting services
+  ansible.builtin.apt:
+    name: "{{ ['ca-certificates', 'openssh-server', 'python3', 'sudo', 'iproute2', 'iputils-ping', 'rsyslog', 'libpam-pwquality'] + (['cloud-init', 'qemu-guest-agent', 'chrony'] if golden_target == 'cloudstack-kvm' else []) }}"
+    state: present
+    update_cache: true
+    install_recommends: false
+    policy_rc_d: 101
+    lock_timeout: 300
+- name: Remove VM-only services from container roots
+  ansible.builtin.apt:
+    name:
+      - cloud-init
+      - qemu-guest-agent
+      - chrony
+    state: absent
+    purge: true
+    policy_rc_d: 101
+  when: golden_target == 'proxmox-lxc'
+- name: Ensure SSH configuration directory exists
+  ansible.builtin.file:
+    path: /etc/ssh/sshd_config.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+- name: Configure metadata sources for CloudStack
+  ansible.builtin.copy:
+    dest: /etc/cloud/cloud.cfg.d/90-zs-cloudstack.cfg
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      datasource_list: [CloudStack, ConfigDrive, None]
+      disable_root: true
+      ssh_pwauth: false
+      ssh_deletekeys: true
+  when: golden_target == 'cloudstack-kvm'
+- name: Enable services for the next guest boot only
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - enable
+      - --no-reload
+      - "{{ item }}"
+  loop: "{{ ['ssh', 'rsyslog'] + (['chrony'] if golden_target == 'cloudstack-kvm' else []) }}"
+  register: golden_enable_service
+  changed_when: "'Created symlink' in golden_enable_service.stderr"
+- name: Record source manifest provenance
+  ansible.builtin.copy:
+    dest: /etc/golden-image.json
+    owner: root
+    group: root
+    mode: '0644'
+    content: "{{ {'profile': golden_profile, 'target': golden_target, 'image_version': golden_image_version, 'source_commit': golden_source_commit, 'source_kind': golden_source_kind, 'source_manifest_sha256': golden_source_image_sha256, 'status': 'experimental-unaccepted'} | to_nice_json }}\n"
+- name: Reject inherited enrollment or administrative identity
+  ansible.builtin.command:
+    argv:
+      - /bin/sh
+      - -ec
+      - 'test ! -s /var/ossec/etc/client.keys; test ! -s /root/.ssh/authorized_keys'
+  changed_when: false
+- name: Discover packaged cloud-init boot units
+  ansible.builtin.shell: |
+    set -eu
+    systemctl list-unit-files 'cloud-init*.service' 'cloud-config.service' 'cloud-final.service' --no-legend --no-pager | awk '{print $1}'
+  args:
+    executable: /bin/sh
+  register: golden_cloud_units
+  changed_when: false
+  when: golden_target == 'cloudstack-kvm'
+- name: Require packaged cloud-init units
+  ansible.builtin.assert:
+    that: golden_cloud_units.stdout_lines | length > 0
+  when: golden_target == 'cloudstack-kvm'
+- name: Enable packaged cloud-init units for the next boot
+  ansible.builtin.command:
+    argv: [systemctl, enable, --no-reload, "{{ item }}"]
+  loop: "{{ golden_cloud_units.stdout_lines | default([]) }}"
+  register: golden_cloud_enable
+  changed_when: "'Created symlink' in golden_cloud_enable.stderr"
+  when: golden_target == 'cloudstack-kvm'

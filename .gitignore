@@ -1,0 +1,12 @@
+.packer.d/
+packer_cache/
+*.pkrvars.hcl
+*.auto.pkrvars.hcl
+!profiles/*.pkrvars.hcl
+site*.json
+*.pem
+*.key
+artifacts/
+__pycache__/
+*.py[cod]
+.venv/

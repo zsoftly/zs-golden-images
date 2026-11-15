@@ -1,0 +1,65 @@
+{
+  "syver": {
+    "version": "0.15.1",
+    "url": "https://github.com/krameff/syver/releases/download/v0.15.1/syver-linux-amd64",
+    "sha256": "adad9b1902d745c6ed3e11ce50d13da6f6607fb8db34d2ebe5ec17285f7713ba"
+  },
+  "profiles": {
+    "debian-13": {
+      "os_id": "debian",
+      "os_version": "13",
+      "benchmark_version": "1.1.0",
+      "audit_repository": "https://github.com/ansible-lockdown/DEBIAN13-CIS-Audit.git",
+      "audit_commit": "1a02e81f141c9b86a8620daee62dd07ec3634d0a",
+      "entrypoint": "syver.yml",
+      "remediation_candidate": {
+        "repository": "https://github.com/ansible-lockdown/DEBIAN13-CIS",
+        "commit": "7e7b19134b706823980325a3f4dd60806ab1d0f3",
+        "benchmark_version": "1.0.0",
+        "enabled": false
+      },
+      "overrides": {
+        "deb13cis_level_1": true,
+        "deb13cis_level_2": false,
+        "run_heavy_tests": false,
+        "deb13cis_rule_1_2_2_1": false,
+        "deb13cis_rule_5_4_2_5": false
+      },
+      "omissions": [
+        "Heavy checks disabled for the bounded pilot",
+        "1.2.2.1 disabled because upstream invokes apt update",
+        "5.4.2.5 disabled because upstream executes login shell profiles"
+      ],
+      "coverage_reviewed": false
+    },
+    "ubuntu-26.04": {
+      "os_id": "ubuntu",
+      "os_version": "26.04",
+      "benchmark_version": "1.0.0",
+      "audit_repository": "https://github.com/ansible-lockdown/UBUNTU26-CIS-Audit.git",
+      "audit_commit": "30675914e43b3d3821094c5f675d1baa993dc061",
+      "entrypoint": "goss.yml",
+      "remediation_candidate": {
+        "repository": "https://github.com/ansible-lockdown/UBUNTU26-CIS",
+        "commit": "9746233c6b14dd94758fc11e39e51ce6f5af24b7",
+        "benchmark_version": "1.0.0",
+        "enabled": false
+      },
+      "overrides": {
+        "ubtu26cis_level_1": true,
+        "ubtu26cis_level_2": false,
+        "run_heavy_tests": false,
+        "ubtu26cis_rule_5_4_2_5": false,
+        "ubtu26cis_rule_7_2_3": false,
+        "ubtu26cis_rule_1_1_1_11": false
+      },
+      "omissions": [
+        "Heavy checks disabled for the bounded pilot",
+        "5.4.2.5 disabled because upstream executes login shell profiles",
+        "7.2.3 disabled because upstream writes and deletes fixed temporary paths",
+        "1.1.1.11 disabled because upstream executes a preexisting helper outside the pinned audit"
+      ],
+      "coverage_reviewed": false
+    }
+  }
+}

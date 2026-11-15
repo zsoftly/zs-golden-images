@@ -1,0 +1,8 @@
+---
+- name: Install tools on the explicitly allocated isolated builder
+  hosts: golden_builders
+  become: true
+  gather_facts: true
+  serial: 1
+  roles:
+    - builder

@@ -1,0 +1,92 @@
+---
+- name: Validate effective SSH policy
+  ansible.builtin.command: /usr/sbin/sshd -T
+  register: golden_sshd
+  changed_when: false
+- name: Require effective key-only administrative access
+  ansible.builtin.assert:
+    that:
+      - "'permitrootlogin no' in golden_sshd.stdout_lines"
+      - "'passwordauthentication no' in golden_sshd.stdout_lines"
+      - "'kbdinteractiveauthentication no' in golden_sshd.stdout_lines"
+      - "'maxauthtries 4' in golden_sshd.stdout_lines"
+- name: Read runtime service states
+  ansible.builtin.service_facts:
+- name: Verify essential services are running
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.services[item].state == 'running'
+  loop: "{{ ['ssh.service', 'rsyslog.service'] + (['qemu-guest-agent.service', 'chrony.service'] if golden_target == 'cloudstack-kvm' else []) }}"
+- name: Require completed cloud-init on VMs
+  ansible.builtin.command: cloud-init status --wait
+  timeout: 180
+  changed_when: false
+  when: golden_target == 'cloudstack-kvm'
+- name: Verify PAM password quality is active
+  ansible.builtin.command: grep -E ^password.*pam_pwquality.so /etc/pam.d/common-password
+  changed_when: false
+- name: Read VM kernel settings
+  ansible.builtin.command:
+    argv: [sysctl, -n, "{{ item.key }}"]
+  loop:
+    - {key: kernel.randomize_va_space, value: '2'}
+    - {key: fs.suid_dumpable, value: '0'}
+    - {key: net.ipv4.ip_forward, value: '0'}
+    - {key: net.ipv4.conf.all.accept_redirects, value: '0'}
+  register: golden_sysctl
+  changed_when: false
+  failed_when: golden_sysctl.stdout != item.value
+  when: golden_target == 'cloudstack-kvm'
+- name: Check public image has no Wazuh identity
+  ansible.builtin.command: /bin/sh -ec 'test ! -s /var/ossec/etc/client.keys'
+  changed_when: false
+  when: golden_enrollment_policy == 'public'
+- name: Verify managed Wazuh readiness
+  when: golden_enrollment_policy == 'managed'
+  block:
+    - name: Require an explicit manager verification context
+      ansible.builtin.assert:
+        that:
+          - golden_wazuh_api_url is match('^https://')
+          - golden_wazuh_agent_id is match('^[0-9]+$')
+          - golden_wazuh_api_token | length > 0
+      no_log: true
+    - name: Require local agent identity and process state
+      ansible.builtin.command: /bin/sh -ec 'test -s /var/ossec/etc/client.keys; /var/ossec/bin/wazuh-control status'
+      register: golden_wazuh_process
+      changed_when: false
+      failed_when: golden_wazuh_process.rc != 0 or 'wazuh-agentd is running' not in golden_wazuh_process.stdout
+      no_log: true
+    - name: Read only the locally enrolled agent identifier
+      ansible.builtin.command:
+        argv:
+          - awk
+          - 'NF == 4 && $1 ~ /^[0-9]+$/ { print $1; count++ } END { if (count != 1) exit 1 }'
+          - /var/ossec/etc/client.keys
+      register: golden_wazuh_local_identity
+      changed_when: false
+      no_log: true
+    - name: Bind manager verification to this guest identity
+      ansible.builtin.assert:
+        that: golden_wazuh_local_identity.stdout == golden_wazuh_agent_id
+      no_log: true
+    - name: Read manager-confirmed agent status
+      ansible.builtin.uri:
+        url: "{{ golden_wazuh_api_url }}/agents?agents_list={{ golden_wazuh_agent_id }}&select=id,status"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ golden_wazuh_api_token }}"
+        validate_certs: true
+        return_content: true
+      delegate_to: localhost
+      become: false
+      register: golden_wazuh_manager
+      no_log: true
+    - name: Require the selected agent is connected on its manager
+      ansible.builtin.assert:
+        that:
+          - golden_wazuh_manager.json.error == 0
+          - golden_wazuh_manager.json.data.affected_items | length == 1
+          - golden_wazuh_manager.json.data.affected_items[0].id == golden_wazuh_agent_id
+          - golden_wazuh_manager.json.data.affected_items[0].status == 'active'
+      no_log: true

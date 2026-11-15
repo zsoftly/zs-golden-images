@@ -1,0 +1,4 @@
+{
+  "debian-13": {"distribution": "debian", "release": "trixie", "components": ["main"], "dib_element": "debian-minimal"},
+  "ubuntu-26.04": {"distribution": "ubuntu", "release": "resolute", "components": ["main", "universe"], "dib_element": "ubuntu-minimal"}
+}

@@ -1,0 +1,17 @@
+---
+- name: Configure an isolated image build guest
+  hosts: all
+  become: true
+  gather_facts: true
+  pre_tasks:
+    - name: Require the supported guest and build provenance
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.virtualization_type == 'kvm'
+          - ansible_facts.virtualization_role == 'guest'
+          - golden_profile in ['debian-13', 'ubuntu-26.04']
+          - (golden_profile == 'debian-13' and ansible_facts.distribution == 'Debian' and ansible_facts.distribution_major_version == '13') or (golden_profile == 'ubuntu-26.04' and ansible_facts.distribution == 'Ubuntu' and ansible_facts.distribution_version == '26.04')
+          - golden_source_commit is match('^[0-9a-f]{40}$')
+          - golden_source_image_sha256 is match('^[0-9a-f]{64}$')
+  roles:
+    - base
