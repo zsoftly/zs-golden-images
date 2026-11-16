@@ -74,6 +74,34 @@ class CollectionIntegrity(unittest.TestCase):
 
 
 class NativeBuilderPolicy(unittest.TestCase):
+    def test_shared_ansible_adapter_scopes_utf8_to_child_under_c_locale(self):
+        source = (REPO / "scripts/configure-rootfs.sh").read_text()
+        invocation = next(line for line in source.splitlines() if '/venv/bin/ansible-playbook -i ' in line)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            probe = root / "ansible-probe"
+            probe.write_text('#!' + sys.executable + '\nimport json, locale, os\n'
+                             'locale.setlocale(locale.LC_ALL, "")\n'
+                             'print(json.dumps({"LANG": os.environ["LANG"], "LC_ALL": os.environ["LC_ALL"], '
+                             '"encoding": locale.getpreferredencoding(False)}))\n')
+            probe.chmod(0o755)
+            invocation = invocation.replace('/opt/zs-golden-images/venv/bin/ansible-playbook', str(probe))
+            for profile in ("debian-13", "ubuntu-26.04"):
+                for target in ("cloudstack-kvm", "proxmox-lxc"):
+                    for phase in ("configure", "harden", "cleanup"):
+                        with self.subTest(profile=profile, target=target, phase=phase):
+                            command = ('set -euo pipefail\nrepo=$1; state=$1; phase=$2; profile=$3; target=$4\n'
+                                       + invocation + '\nprintf "%s %s\\n" "$LANG" "$LC_ALL"\n')
+                            result = subprocess.run(["bash", "-c", command, "locale-adapter", str(root), phase, profile, target],
+                                                    env=dict(os.environ, LANG="C", LC_ALL="C", PYTHONUTF8="0", PYTHONCOERCECLOCALE="0"),
+                                                    capture_output=True, text=True, check=True)
+                            child, parent = result.stdout.splitlines()
+                            observed = json.loads(child)
+                            self.assertEqual(observed["LANG"], "C.UTF-8")
+                            self.assertEqual(observed["LC_ALL"], "C.UTF-8")
+                            self.assertEqual(observed["encoding"].replace("-", "").lower(), "utf8")
+                            self.assertEqual(parent, "C C")
+
     def test_vm_build_selects_sudo_that_preserves_architecture(self):
         # Exercise the pipeline's actual preflight against sudo implementations
         # that preserve or discard ARCH, without privilege changes or DIB.
