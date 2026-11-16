@@ -2,6 +2,9 @@
 - name: Configure an offline image root filesystem
   hosts: image
   gather_facts: false
+  environment:
+    TMPDIR: /tmp
+    TMP_DIR: /tmp
   pre_tasks:
     - name: Require the guarded chroot adapter
       ansible.builtin.assert:

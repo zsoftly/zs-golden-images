@@ -39,3 +39,7 @@ if [ -d /root/.ansible ]; then
 fi
 CLEAN_ANSIBLE
 fi
+# Receipt is external to the image and exists only after all phase work succeeds.
+metadata_sha=$(sha256sum "$metadata" | awk '{print $1}')
+jq -n --arg phase "$phase" --arg profile "$profile" --arg target "$target" --arg sha "$metadata_sha" \
+  '{phase:$phase,profile:$profile,target:$target,metadata_sha256:$sha,status:"completed"}' > "$metadata.$phase.json"

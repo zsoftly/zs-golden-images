@@ -1,5 +1,9 @@
 """Integrity and native-builder boundary regressions without a live image build."""
 import importlib.util
+import importlib.metadata
+import hashlib
+import shutil
+import sys
 import json
 import os
 from pathlib import Path
@@ -105,6 +109,33 @@ class NativeBuilderPolicy(unittest.TestCase):
                     if not success:
                         self.assertIn("requires sudo -E", result.stderr)
 
+    def test_native_definition_scopes_temporary_paths_to_chroot_only(self):
+        source = (REPO / "scripts/pipeline.sh").read_text()
+        start = source.index('  jq -n --arg distro "$distribution"')
+        definition = source[start:source.index('  "${common_env[@]}" "$distrobuilder" build-dir', start)]
+        common_env = next(line for line in source.splitlines() if line.startswith('common_env=('))
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "tmp").mkdir()
+            (root / "archive-keys.asc").write_text("test fixture key material\n")
+            setup = ('set -euo pipefail\nrun=$1; distribution=debian; release=trixie; version=20261116-r2; '
+                     'mirror=https://snapshot.invalid/debian; security_mirror=https://snapshot.invalid/security; '
+                     "profile_json='{\"components\":[\"main\"]}'; epoch=1\n")
+            result = subprocess.run(["bash", "-c", setup + common_env + "\n" + definition + '\n"${common_env[@]}" env',
+                                     "definition-test", str(root)], capture_output=True, text=True, check=True)
+            host_environment = dict(line.split("=", 1) for line in result.stdout.splitlines())
+            for name in ("TMPDIR", "TMP_DIR"):
+                self.assertEqual(host_environment[name], str(root / "tmp"))
+            generated = json.loads((root / "lxc.json").read_text())
+            expected = {"TMPDIR": "/tmp", "TMP_DIR": "/tmp"}
+            self.assertEqual({item["key"]: item["value"] for item in generated["environment"]["variables"]}, expected)
+            self.assertFalse(generated["environment"].get("clear_defaults", False))
+            packed = subprocess.run(["jq", "-f", str(REPO / "builders/distrobuilder/pack.jq"), str(root / "lxc.json")],
+                                    capture_output=True, text=True, check=True)
+            self.assertEqual(json.loads(packed.stdout)["environment"], generated["environment"])
+            play = yaml.safe_load((REPO / "ansible/playbooks/30-configure-rootfs.yml").read_text())[0]
+            self.assertEqual(play["environment"], expected)
+
     def test_lxc_mount_cleanup_runs_in_reverse_order_after_phase_failure(self):
         # Exercise the actual mount/phase/trap body with inert mount commands;
         # private namespace creation itself requires the authorized Linux host.
@@ -176,6 +207,83 @@ class NativeBuilderPolicy(unittest.TestCase):
         self.assertIn('tmpfs "$rootfs/run"', helper)
         self.assertIn('mount --bind "/dev/$device"', helper)
         self.assertIn("configure harden cleanup", helper)
+
+
+class BuildPhaseEvidence(unittest.TestCase):
+    def test_candidate_gate_rejects_missing_failed_and_foreign_phase_receipts(self):
+        source = (REPO / "scripts/pipeline.sh").read_text()
+        start = source.index('metadata_sha=$(sha256sum "$run/metadata.json"')
+        body = source[start:source.index('artifact_sha=', start)]
+        for fault in (None, "missing", "failed", "metadata", "profile", "target", "phase"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                metadata = root / "metadata.json"
+                metadata.write_text('{"image_version":"20261116-r3"}\n')
+                expected = hashlib.sha256(metadata.read_bytes()).hexdigest()
+                for phase in ("configure", "harden", "cleanup"):
+                    receipt = {"phase": phase, "profile": "debian-13", "target": "cloudstack-kvm",
+                               "metadata_sha256": expected, "status": "completed"}
+                    if phase == "harden" and fault:
+                        if fault == "missing":
+                            continue
+                        key = {"failed": "status", "metadata": "metadata_sha256"}.get(fault, fault)
+                        receipt[key] = "wrong"
+                    metadata.with_name(metadata.name + "." + phase + ".json").write_text(json.dumps(receipt))
+                command = 'set -euo pipefail\nfail() { echo "$*" >&2; exit 1; }\nrun=$1; repo=$2; profile=debian-13; target=cloudstack-kvm\n' + body
+                result = subprocess.run(["bash", "-c", command, "phase-gate", str(root), str(REPO)], capture_output=True, text=True)
+                self.assertEqual(result.returncode == 0, fault is None, result.stderr)
+                if fault is None:
+                    self.assertEqual([item["phase"] for item in json.loads((root / "build-phases.json").read_text())],
+                                     ["configure", "harden", "cleanup"])
+
+    def test_adapter_records_only_successful_phases_after_cleanup(self):
+        source = (REPO / "scripts/configure-rootfs.sh").read_text()
+        body = source[source.index('ANSIBLE_COLLECTIONS_PATH=/opt/zs-golden-images/collections ANSIBLE_ROLES_PATH='):]
+        for phase in ("configure", "harden", "cleanup"):
+            for failing in ("", "ansible", "chroot"):
+                with self.subTest(phase=phase, failing=failing), tempfile.TemporaryDirectory() as temp:
+                    root = Path(temp)
+                    metadata = root / "metadata.json"
+                    metadata.write_text('{}\n')
+                    for executable in ("ansible", "chroot"):
+                        path = root / executable
+                        path.write_text('#!/bin/sh\n[ "$FAIL_PHASE_STEP" != "' + executable + '" ] || exit 23\n')
+                        path.chmod(0o755)
+                    body_run = body.replace('/opt/zs-golden-images/venv/bin/ansible-playbook', str(root / 'ansible'))
+                    command = 'set -euo pipefail\nrepo=$1; state=$1; rootfs=$1; metadata=$1/metadata.json; phase=$2; profile=debian-13; target=cloudstack-kvm\n' + body_run
+                    result = subprocess.run(["bash", "-c", command, "phase-adapter", str(root), phase],
+                                            env=dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"], FAIL_PHASE_STEP=failing),
+                                            capture_output=True, text=True)
+                    success = failing == "" or (failing == "chroot" and phase != "cleanup")
+                    self.assertEqual(result.returncode == 0, success, result.stderr)
+                    receipt = root / ("metadata.json." + phase + ".json")
+                    self.assertEqual(receipt.exists(), success)
+                    if success:
+                        self.assertEqual(json.loads(receipt.read_text())["metadata_sha256"], hashlib.sha256(metadata.read_bytes()).hexdigest())
+
+
+@unittest.skipUnless(sys.platform == "linux", "Actual DIB runner requires Linux GNU find; exercised on the dedicated builder")
+class DibHookDiscovery(unittest.TestCase):
+    def test_pinned_upstream_runner_selects_every_hook_and_rejects_shell_suffix(self):
+        # Execute upstream's real selector, never a copied filename regular expression.
+        expected = json.loads((REPO / "builders/pins.json").read_text())["diskimage_builder"]["version"]
+        self.assertEqual(importlib.metadata.version("diskimage-builder"), expected)
+        spec = importlib.util.find_spec("diskimage_builder")
+        runner = Path(spec.origin).parent / "lib/dib-run-parts"
+        env = dict(os.environ)
+        env.pop("RUN_PARTS_REGEX", None)
+        element = REPO / "builders/diskimage-builder/elements/zs-configure"
+        for stage in ("root.d", "post-root.d", "cleanup.d"):
+            hooks = sorted((element / stage).iterdir())
+            result = subprocess.run(["bash", str(runner), "--list", str(element / stage)],
+                                    env=env, capture_output=True, text=True, check=True)
+            self.assertEqual(result.stdout.splitlines(), [str(hook) for hook in hooks])
+            with tempfile.TemporaryDirectory() as temp:
+                legacy = Path(temp) / (hooks[0].name + ".sh")
+                shutil.copy2(hooks[0], legacy)
+                result = subprocess.run(["bash", str(runner), "--list", temp],
+                                        env=env, capture_output=True, text=True, check=True)
+                self.assertEqual(result.stdout, "")
 
 
 if __name__ == "__main__":
