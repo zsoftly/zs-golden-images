@@ -109,6 +109,33 @@ class NativeBuilderPolicy(unittest.TestCase):
                     if not success:
                         self.assertIn("requires sudo -E", result.stderr)
 
+    def test_native_definition_scopes_temporary_paths_to_chroot_only(self):
+        source = (REPO / "scripts/pipeline.sh").read_text()
+        start = source.index('  jq -n --arg distro "$distribution"')
+        definition = source[start:source.index('  "${common_env[@]}" "$distrobuilder" build-dir', start)]
+        common_env = next(line for line in source.splitlines() if line.startswith('common_env=('))
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "tmp").mkdir()
+            (root / "archive-keys.asc").write_text("test fixture key material\n")
+            setup = ('set -euo pipefail\nrun=$1; distribution=debian; release=trixie; version=20261116-r2; '
+                     'mirror=https://snapshot.invalid/debian; security_mirror=https://snapshot.invalid/security; '
+                     "profile_json='{\"components\":[\"main\"]}'; epoch=1\n")
+            result = subprocess.run(["bash", "-c", setup + common_env + "\n" + definition + '\n"${common_env[@]}" env',
+                                     "definition-test", str(root)], capture_output=True, text=True, check=True)
+            host_environment = dict(line.split("=", 1) for line in result.stdout.splitlines())
+            for name in ("TMPDIR", "TMP_DIR"):
+                self.assertEqual(host_environment[name], str(root / "tmp"))
+            generated = json.loads((root / "lxc.json").read_text())
+            expected = {"TMPDIR": "/tmp", "TMP_DIR": "/tmp"}
+            self.assertEqual({item["key"]: item["value"] for item in generated["environment"]["variables"]}, expected)
+            self.assertFalse(generated["environment"].get("clear_defaults", False))
+            packed = subprocess.run(["jq", "-f", str(REPO / "builders/distrobuilder/pack.jq"), str(root / "lxc.json")],
+                                    capture_output=True, text=True, check=True)
+            self.assertEqual(json.loads(packed.stdout)["environment"], generated["environment"])
+            play = yaml.safe_load((REPO / "ansible/playbooks/30-configure-rootfs.yml").read_text())[0]
+            self.assertEqual(play["environment"], expected)
+
     def test_lxc_mount_cleanup_runs_in_reverse_order_after_phase_failure(self):
         # Exercise the actual mount/phase/trap body with inert mount commands;
         # private namespace creation itself requires the authorized Linux host.

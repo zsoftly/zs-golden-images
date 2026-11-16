@@ -160,6 +160,7 @@ else
     '{image:{distribution:$distro,release:$release,architecture:"x86_64",serial:$version,variant:"default"},
       source:{downloader:"debootstrap",url:$mirror,variant:"minbase",components:$components,skip_verification:false,keys:[$archive_keys]},
       mappings:{architecture_map:"debian"},
+      environment:{variables:[{key:"TMPDIR",value:"/tmp"},{key:"TMP_DIR",value:"/tmp"}]},
       packages:{manager:"apt",update:true,cleanup:true,
         repositories:[{name:"sources.list",url:("deb [check-valid-until=no] " + $mirror + " " + $release + " " + ($components|join(" ")) + "\ndeb [check-valid-until=no] " + $mirror + " " + $release + "-updates " + ($components|join(" ")) + "\ndeb [check-valid-until=no] " + $security + " " + $release + "-security " + ($components|join(" ")))}],
         sets:[{packages:["ca-certificates"],action:"install",early:true},{packages:["python3","systemd-sysv"],action:"install"}]},
