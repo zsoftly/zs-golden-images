@@ -16,7 +16,7 @@ shell_files=()
 while IFS= read -r -d '' script; do
   bash -n "$script"
   shell_files+=("$script")
-done < <(rg --files -0 -g '*.sh' -g '!artifacts/**')
+done < <(rg --files -0 -g '*.sh' -g 'builders/diskimage-builder/elements/*/root.d/*' -g 'builders/diskimage-builder/elements/*/post-root.d/*' -g 'builders/diskimage-builder/elements/*/cleanup.d/*' -g '!artifacts/**')
 shellcheck "${shell_files[@]}"
 
 for playbook in ansible/playbooks/*.yml; do

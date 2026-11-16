@@ -7,7 +7,7 @@
   when: golden_target == 'cloudstack-kvm'
 - name: Install shared image packages without starting services
   ansible.builtin.apt:
-    name: "{{ ['ca-certificates', 'openssh-server', 'python3', 'sudo', 'iproute2', 'iputils-ping', 'rsyslog', 'libpam-pwquality'] + (['cloud-init', 'qemu-guest-agent', 'chrony', 'netplan.io', 'systemd-resolved'] if golden_target == 'cloudstack-kvm' else []) }}"
+    name: "{{ ['ca-certificates', 'openssh-server', 'python3', 'sudo', 'iproute2', 'iputils-ping', 'rsyslog', 'libpam-pwquality'] + (['cloud-init', 'cloud-guest-utils', 'e2fsprogs', 'qemu-guest-agent', 'chrony', 'netplan.io', 'systemd-resolved'] if golden_target == 'cloudstack-kvm' else []) }}"
     state: present
     update_cache: true
     install_recommends: false

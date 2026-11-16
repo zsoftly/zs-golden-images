@@ -106,7 +106,7 @@ class PipelineInputs(unittest.TestCase):
         root = Path(self.temp.name) / "rootfs"
         apt = root / "etc/apt/apt.conf.d"
         apt.mkdir(parents=True)
-        hook = REPO / "builders/diskimage-builder/elements/zs-configure/root.d/09-zs-snapshot.sh"
+        hook = REPO / "builders/diskimage-builder/elements/zs-configure/root.d/09-zs-snapshot"
         env = dict(os.environ, TARGET_ROOT=str(root), ZS_METADATA=str(self.site), GOLDEN_APPLY="build")
         result = subprocess.run([str(hook)], env=env, capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)

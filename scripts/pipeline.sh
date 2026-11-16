@@ -173,9 +173,14 @@ else
 fi
 verify_sources
 [[ -f "$artifact" && ! -L "$artifact" ]] || fail 'Upstream builder did not produce the expected artifact.'
+metadata_sha=$(sha256sum "$run/metadata.json" | awk '{print $1}')
+jq -se --arg profile "$profile" --arg target "$target" --arg sha "$metadata_sha" \
+  -f "$repo/builders/build-phases.schema.jq" \
+  "$run/metadata.json.configure.json" "$run/metadata.json.harden.json" "$run/metadata.json.cleanup.json" \
+  > "$run/build-phases.json" || fail 'Missing or mismatched successful configure, harden, or cleanup phase evidence.'
 artifact_sha=$(sha256sum "$artifact" | awk '{print $1}')
 jq -n --arg profile "$profile" --arg target "$target" --arg version "$version" --arg commit "$source_commit" --arg artifact "$artifact" --arg sha "$artifact_sha" \
-  --slurpfile sources "$run/sources.json" --slurpfile builders "$repo/builders/pins.json" --slurpfile toolchain /etc/zs-golden-images/toolchain.json \
-  '{schema_version:1,profile:$profile,target:$target,version:$version,source_commit:$commit,artifact:{path:$artifact,sha256:$sha},inputs:{sources:$sources[0],builders:$builders[0],toolchain:$toolchain[0]},status:"experimental-unaccepted",reproducibility:"pinned inputs; byte-for-byte reproducibility not established"}' > "$run/candidate.json"
+  --slurpfile phases "$run/build-phases.json" --slurpfile sources "$run/sources.json" --slurpfile builders "$repo/builders/pins.json" --slurpfile toolchain /etc/zs-golden-images/toolchain.json \
+  '{schema_version:1,profile:$profile,target:$target,version:$version,source_commit:$commit,artifact:{path:$artifact,sha256:$sha},inputs:{build_phases:$phases[0],sources:$sources[0],builders:$builders[0],toolchain:$toolchain[0]},status:"experimental-unaccepted",reproducibility:"pinned inputs; byte-for-byte reproducibility not established"}' > "$run/candidate.json"
 printf '[BLOCKED] Candidate: %s. Live compatibility, security acceptance, signed approval, and release remain required.\n' "$run/candidate.json"
 exit 2

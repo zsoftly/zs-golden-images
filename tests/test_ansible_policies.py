@@ -10,6 +10,7 @@ import tempfile
 import unittest
 
 import jinja2
+import jinja2.nativetypes
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +25,17 @@ def task(role, name):
 
 
 class ImagePolicyTests(unittest.TestCase):
+    def test_vm_has_cloud_init_partition_and_ext4_resize_tools(self):
+        data = task('image_configure', 'Install shared image packages without starting services')['ansible.builtin.apt']
+        env = jinja2.nativetypes.NativeEnvironment(undefined=jinja2.StrictUndefined)
+        template = env.from_string(data['name'])
+        vm = template.render(golden_target='cloudstack-kvm')
+        lxc = template.render(golden_target='proxmox-lxc')
+        for package in ('cloud-guest-utils', 'e2fsprogs'):
+            self.assertIn(package, vm)
+            self.assertNotIn(package, lxc)
+
+
     def test_ssh_include_rewrite_is_stable_on_second_pass(self):
         data = task('image_harden', 'Place drop-in policies before every existing SSH setting')['ansible.builtin.copy']
         env = jinja2.Environment(undefined=jinja2.StrictUndefined)
