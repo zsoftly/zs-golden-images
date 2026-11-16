@@ -60,6 +60,7 @@
       - debian-archive-keyring
       - ubuntu-keyring
       - rsync
+      - sudo
       - gnupg
       - gpgv
       - squashfs-tools
