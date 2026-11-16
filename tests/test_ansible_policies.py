@@ -280,35 +280,79 @@ class ImagePolicyTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(resolver.read_text(), 'nameserver 192.0.2.1\n')
 
-    def test_ansible_state_cleanup_removes_residue_and_refuses_linked_root(self):
+    def test_post_ansible_cleanup_removes_residue_and_preserves_temporary_roots(self):
         source = (ROOT / 'scripts/configure-rootfs.sh').read_text()
         self.assertLess(source.index('/opt/zs-golden-images/venv/bin/ansible-playbook'),
                         source.index("<<'CLEAN_ANSIBLE'"))
-        script = source.split("<<'CLEAN_ANSIBLE'\n", 1)[1].split('\nCLEAN_ANSIBLE', 1)[0]
-        for linked in (False, True):
-            with self.subTest(linked=linked), tempfile.TemporaryDirectory() as directory:
+        body = source.split("<<'CLEAN_ANSIBLE'\n", 1)[1].split('\nCLEAN_ANSIBLE', 1)[0]
+        for fault in (None, 'linked-root', 'linked-var', 'linked-tmp', 'linked-var/tmp', 'linked-root/.ansible',
+                      'mounted-tmp', 'mounted-var/tmp', 'mounted-root/.ansible'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
-                home = root / 'root'
-                home.mkdir()
+                for name in ('tmp', 'var/tmp', 'root/.ansible/tmp'):
+                    (root / name).mkdir(parents=True)
+                    (root / name / 'payload').write_text('temporary')
+                for name in ('tmp', 'var/tmp'):
+                    (root / name).chmod(0o1777)
                 external = root / 'private'
                 external.mkdir()
                 (external / 'keep').write_text('unchanged')
-                if linked:
-                    (home / '.ansible').symlink_to(external)
-                else:
-                    (home / '.ansible' / 'tmp').mkdir(parents=True)
-                    (home / '.ansible' / 'tmp' / 'module').write_text('temporary')
-                    (home / '.ansible' / 'outside').symlink_to(external)
+                (root / 'tmp/outside').symlink_to(external)
+                if fault and fault.startswith('linked-'):
+                    path = root / fault.removeprefix('linked-')
+                    path.rename(root / 'original-parent')
+                    path.symlink_to(external)
+                mounted = root / fault.removeprefix('mounted-') if fault and fault.startswith('mounted-') else None
                 mountpoint = root / 'mountpoint'
-                mountpoint.write_text('#!/bin/sh\nexit 1\n')
+                mountpoint.write_text('#!/bin/sh\n' + ('test "$2" = ' + shlex.quote(str(mounted)) + '\n' if mounted else 'exit 1\n'))
                 mountpoint.chmod(0o700)
-                result = subprocess.run(['/bin/sh', '-c', script.replace('/root', shlex.quote(str(home)))],
-                                        capture_output=True, text=True,
+                # Translate each guest root once; never rewrite a temporary fixture path twice.
+                script = re.sub(r'(?<![A-Za-z0-9_/.-])/(root|var|tmp)(?=[/\s;])',
+                                lambda match: shlex.quote(str(root / match.group(1))), body)
+                result = subprocess.run(['/bin/sh', '-c', script], capture_output=True, text=True,
                                         env={**os.environ, 'PATH': directory + os.pathsep + os.environ['PATH']})
-                self.assertEqual(result.returncode != 0, linked, result.stderr)
+                self.assertEqual(result.returncode == 0, fault is None, result.stderr)
                 self.assertEqual((external / 'keep').read_text(), 'unchanged')
-                if not linked:
-                    self.assertFalse((home / '.ansible').exists())
+                if fault is None:
+                    self.assertFalse((root / 'root/.ansible').exists())
+                    for name in ('tmp', 'var/tmp'):
+                        self.assertEqual(list((root / name).iterdir()), [])
+                        self.assertEqual((root / name).stat().st_mode & 0o7777, 0o1777)
+                else:
+                    # All guards run before any deletion, including faults on a later path.
+                    preserved = root / ('original-parent/payload' if fault == 'linked-tmp' else 'tmp/payload')
+                    self.assertTrue(preserved.exists())
+
+    def test_role_keeps_live_module_payload_until_post_ansible_cleanup(self):
+        role = task('image_cleanup', 'Remove captured identities and private runtime data')['ansible.builtin.shell']
+        source = (ROOT / 'scripts/configure-rootfs.sh').read_text()
+        post = source.split("<<'CLEAN_ANSIBLE'\n", 1)[1].split('\nCLEAN_ANSIBLE', 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ('tmp', 'var/tmp', 'var/log', 'root/.ansible/tmp', 'etc/ssh', 'var/lib/systemd', 'home'):
+                (root / name).mkdir(parents=True)
+            payload = root / 'tmp/ansible_ansible.legacy.command_payload.zip'
+            payload.write_bytes(b'live module payload')
+            (root / 'var/tmp/leftover').write_text('temporary')
+            (root / 'root/.ansible/tmp/module').write_text('temporary')
+            (root / 'var/log/build.log').write_text('private log')
+            mountpoint = root / 'mountpoint'
+            mountpoint.write_text('#!/bin/sh\nexit 1\n')
+            mountpoint.chmod(0o700)
+            def translate(script):
+                return re.sub(r'(?<![A-Za-z0-9_/.-])/(etc|var|root|home|tmp)(?=[/\s;])',
+                              lambda match: shlex.quote(str(root / match.group(1))), script)
+            environment = {**os.environ, 'PATH': directory + os.pathsep + os.environ['PATH']}
+            # The child reads its still-live payload after the actual role shell finishes.
+            command = translate(role) + '\ntest -s ' + shlex.quote(str(payload)) + '\n'
+            result = subprocess.run(['/bin/sh', '-ec', command], env=environment, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(payload.read_bytes(), b'live module payload')
+            self.assertEqual(list((root / 'var/log').iterdir()), [])
+            subprocess.run(['/bin/sh', '-ec', translate(post)], env=environment, capture_output=True, text=True, check=True)
+            self.assertFalse(payload.exists())
+            self.assertEqual(list((root / 'var/tmp').iterdir()), [])
+            self.assertFalse((root / 'root/.ansible').exists())
 
     def test_audit_accepts_external_acceptance_provenance_without_accepting_lxc(self):
         source = (ROOT / 'scripts/audit-guest.sh').read_text()

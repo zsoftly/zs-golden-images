@@ -59,7 +59,7 @@
 - name: Remove captured identities and private runtime data
   ansible.builtin.shell: |
     set -eu
-    for path in /var/log /tmp /var/tmp; do
+    for path in /var/log; do
       test ! -L "$path"
       if mountpoint -q "$path"; then exit 1; fi
     done
@@ -68,7 +68,7 @@
     for home in /home/*; do
       test ! -d "$home" || rm -f "$home/.ssh/authorized_keys" "$home/.bash_history" "$home/.zsh_history"
     done
-    for path in /var/log /tmp /var/tmp; do
+    for path in /var/log; do
       test ! -d "$path" || find "$path" -xdev -mindepth 1 -delete
     done
     test ! -d /var/lib/dhcp || find /var/lib/dhcp -xdev -type f -name '*.leases' -delete

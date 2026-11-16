@@ -33,8 +33,14 @@ if [[ "$phase" == cleanup ]]; then
   chroot "$rootfs" /bin/sh -s <<'CLEAN_ANSIBLE'
 set -eu
 test ! -L /root
-test ! -L /root/.ansible
-if mountpoint -q /root/.ansible; then exit 1; fi
+test ! -L /var
+for path in /tmp /var/tmp /root/.ansible; do
+  test ! -L "$path"
+  if mountpoint -q "$path"; then exit 1; fi
+done
+for path in /tmp /var/tmp; do
+  test ! -d "$path" || find "$path" -xdev -mindepth 1 -delete
+done
 if [ -d /root/.ansible ]; then
   find /root/.ansible -xdev -depth -delete
 fi
