@@ -136,6 +136,12 @@ After live remediation approval, the private runtime variables must supply the r
 GOLDEN_APPLY=remediate ./scripts/run-remediation.sh "$RUNTIME_INVENTORY" "$RUNTIME_VARS"
 ```
 
+## Native candidate smoke tests
+
+The [native smoke helpers](tests/native/README.md) boot disposable candidates on the approved dedicated builder using QEMU/KVM or native LXC. They reuse the runtime Ansible playbooks, preserve the original artifact, and write private evidence for boot, administrative access, restart and identity checks. Their required private site file supplies the protected workspace, evidence directory, builder marker, tool prefix and exact drained runner service.
+
+These tests do not import templates, enable Actions, or establish CloudStack or Proxmox integration acceptance. Platform, networking, security and release gates remain separate. The ordinary offline validation suite exercises harness safety with mocks and archive fixtures; it never starts a guest.
+
 ## Acceptance, signing, and publication
 
 [scripts/release.py](scripts/release.py) keeps offline structure checks, acceptance approval, signing, publication, and platform import distinct. Set `CANDIDATE` to the pipeline's candidate manifest:
