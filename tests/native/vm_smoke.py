@@ -17,7 +17,7 @@ import sys
 import time
 import uuid
 
-from common import (USER, child_guard, digest, load_site, protected, require, require_drained,
+from common import (USER, child_guard, digest, load_site, protected, require, require_runner_context,
                     require_stable, require_unique, run, wait_for, write_json)
 
 
@@ -184,6 +184,7 @@ def test_clone(root, artifact, profile, number, port, site):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--site', type=Path, required=True, help='Private native smoke site JSON')
+    parser.add_argument('--ci-context', type=Path, help='Protected dispatcher context; manual calls still require a drained runner')
     parser.add_argument('candidate', type=Path)
     parser.add_argument('evidence_run', type=Path)
     parser.add_argument('--ssh-port', type=int, default=22280)
@@ -207,7 +208,7 @@ def main():
     fcntl.flock(lockfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     # Keep this process-owned descriptor open until exit, matching pipeline.sh's flock.
     require(re.fullmatch('[A-Za-z0-9_-]+', args.evidence_run.name), 'Use a simple evidence directory name')
-    require_drained(site.runner_service)
+    require_runner_context(site.runner_service, args.ci_context, site, args.candidate)
     require(Path('/dev/kvm').is_char_device(), 'KVM device missing')
     candidate = json.loads(args.candidate.read_text())
     require(candidate['target'] == 'cloudstack-kvm' and candidate['profile'] in ('debian-13', 'ubuntu-26.04'), 'Unsupported candidate')

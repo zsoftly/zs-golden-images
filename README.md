@@ -2,7 +2,7 @@
 
 One image project for Debian 13 and Ubuntu 26.04 LTS, using OpenStack diskimage-builder for CloudStack/KVM disks and LXC distrobuilder for Proxmox LXC archives. Ansible provides shared operating-system configuration and target-specific hardening.
 
-The active pipeline targets a dedicated, isolated bare-metal builder. It does not allocate production Proxmox capacity. No image has passed a live build or platform acceptance test in this project. GitHub Actions remains disabled; image publication and production template changes are held.
+The active pipeline targets a dedicated, isolated bare-metal builder and does not allocate production Proxmox capacity. The manual CI workflow separates preflight, build, inspection and native smoke testing. Each installation requires its own approved host, invocation permissions and live verification; a passing candidate pipeline does not approve publication or production templates.
 
 ## Common pipeline
 
@@ -35,7 +35,7 @@ The default checks shell syntax, ShellCheck, Ansible syntax, YAML/JSON/Jinja par
 ./scripts/validate.sh --legacy
 ```
 
-The optional legacy check validates Packer formatting and syntax without downloading plugins. Run the same required offline checks before a pull request and include DCO sign-offs on commits. GitHub Actions stays disabled until the dedicated builder is available, approved, and its CI configuration has been reviewed.
+The optional legacy check validates Packer formatting and syntax without downloading plugins. Run the same required offline checks before a pull request and include DCO sign-offs on commits. Before activating GitHub Actions, review the dedicated builder, staged dispatcher, fleet invocation grant and repository security settings.
 
 ## Builder inputs and commands
 
@@ -70,7 +70,7 @@ The pipeline rechecks repository metadata, records source and builder inputs, an
 
 ## Development and operational boundary
 
-The optional [manual CI workflow](docs/manual-ci.md) builds and inspects candidates through a root-owned approval registry. Installing its dispatcher does not grant runner privileges or enable Actions. Activation requires separate review of the fleet-owned invocation permission.
+The optional [manual CI workflow](docs/manual-ci.md) runs preflight, build, inspect and native smoke jobs through a root-owned approval registry. Protected stage receipts permit retries without rebuilding a verified candidate. Installing its dispatcher does not grant runner privileges or enable Actions; the staged interface requires fleet review of all 16 exact commands before activation.
 
 Continue code, unit tests, static checks, Ansible roles, and setup documentation while infrastructure preparation is pending. The infrastructure owner supplies the dedicated server, private inventory, workspace filesystem, isolated network, and verified access. Obtain approval after that handoff before installing the builder or starting live image builds.
 
@@ -140,7 +140,7 @@ GOLDEN_APPLY=remediate ./scripts/run-remediation.sh "$RUNTIME_INVENTORY" "$RUNTI
 
 ## Native candidate smoke tests
 
-The [native smoke helpers](tests/native/README.md) boot disposable candidates on the approved dedicated builder using QEMU/KVM or native LXC. They reuse the runtime Ansible playbooks, preserve the original artifact, and write private evidence for boot, administrative access, restart and identity checks. Their required private site file supplies the protected workspace, evidence directory, builder marker, tool prefix and exact drained runner service.
+The [native smoke helpers](tests/native/README.md) boot disposable candidates on the approved dedicated builder using QEMU/KVM or native LXC. They reuse the runtime Ansible playbooks, preserve the original artifact, and write private evidence for boot, administrative access, restart and identity checks. Their private site file supplies the protected workspace, evidence directory, builder marker, tool prefix and exact runner service. Direct manual runs require that runner to be drained; the staged dispatcher provides a separately guarded CI ownership path.
 
 These tests do not import templates, enable Actions, or establish CloudStack or Proxmox integration acceptance. Platform, networking, security and release gates remain separate. The ordinary offline validation suite exercises harness safety with mocks and archive fixtures; it never starts a guest.
 

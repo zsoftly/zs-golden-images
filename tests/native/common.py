@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import socket
 import stat
 import subprocess
 import time
@@ -98,7 +99,7 @@ def load_site(path):
             'Native smoke requires a clean committed checkout')
     source_commit = run(['git', '-C', project, 'rev-parse', 'HEAD']).stdout.strip()
     require(re.fullmatch('[0-9a-f]{40}', source_commit), 'Missing native test source commit')
-    return SimpleNamespace(**paths, project=project, runner_service=data['runner_service'], source_commit=source_commit)
+    return SimpleNamespace(**paths, site_path=path, project=project, runner_service=data['runner_service'], source_commit=source_commit)
 
 
 def require_unique(first, second, fields):
@@ -119,3 +120,48 @@ def require_drained(service):
             properties.get('LoadState') == 'loaded' and properties.get('ActiveState') == 'inactive',
             'The exact loaded runner service must be drained and stopped')
     require(run(['pgrep', '-f', '[R]unner.Worker'], check=False).returncode == 1, 'Runner job still active')
+
+
+def require_runner_context(service, context_path, site, candidate):
+    """Manual callers drain the runner; CI must prove an owned isolated unit."""
+    if context_path is None:
+        require_drained(service)
+        return
+    require(context_path.is_absolute() and context_path.resolve() == context_path and
+            context_path.is_relative_to(site.tool_prefix / 'ci/evidence'), 'CI context must be protected dispatcher evidence')
+    protected(context_path)
+    require(context_path.is_file() and not context_path.stat().st_mode & 0o077, 'CI context must be private')
+    context = json.loads(context_path.read_text())
+    require(set(context) == {'schema_version', 'candidate', 'candidate_sha256', 'source_commit',
+                            'site_path', 'site_sha256', 'unit', 'guard_unit', 'operation_binding'}, 'Unexpected CI context fields')
+    require(context['schema_version'] == 1 and context['candidate'] == str(candidate) and
+            context['candidate_sha256'] == digest(candidate) and context['source_commit'] == site.source_commit and
+            json.loads(candidate.read_text())['source_commit'] == site.source_commit, 'CI candidate/source binding mismatch')
+    site_path = Path(context['site_path'])
+    protected(site_path)
+    require(site_path == site.site_path and context['site_sha256'] == digest(site_path), 'CI native site binding mismatch')
+    require(re.fullmatch('[0-9a-f]{64}', context['operation_binding']), 'Invalid CI operation binding')
+    unit, guard = context['unit'], context['guard_unit']
+    match = re.fullmatch(r'zs-golden-smoke-(ci-[0-9a-f]{24})-[12]\.service', unit)
+    require(match and guard == 'zs-golden-guard-' + match[1] + '.service', 'Unexpected CI unit ownership')
+    group = '/github.slice/github-runner.slice/' + unit
+    membership = Path('/proc/self/cgroup').read_text().splitlines()
+    require(len(membership) == 1 and membership[0].startswith('0::') and
+            (membership[0][3:] == group or membership[0][3:].startswith(group + '/')), 'Helper is outside its owned CI cgroup')
+    properties = ['Id', 'LoadState', 'ActiveState', 'ControlGroup', 'Slice', 'BindsTo', 'After', 'PrivateNetwork', 'KillMode', 'MainPID', 'Delegate']
+    def state(name):
+        result = run(['systemctl', 'show', name, *sum((['-p', prop] for prop in properties), [])], timeout=15)
+        return dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+    active, lifetime = state(unit), state(guard)
+    require(active.get('Id') == unit and active.get('LoadState') == 'loaded' and active.get('ActiveState') == 'active' and
+            active.get('ControlGroup') == group and active.get('Slice') == 'github-runner.slice' and
+            active.get('PrivateNetwork') == 'yes' and active.get('KillMode') == 'control-group' and
+            guard in active.get('BindsTo', '').split() and guard in active.get('After', '').split(), 'CI unit isolation/lifetime mismatch')
+    if json.loads(candidate.read_text())['target'] == 'proxmox-lxc':
+        require(active.get('Delegate') == 'yes', 'CI LXC unit lacks cgroup delegation')
+    require(lifetime.get('Id') == guard and lifetime.get('LoadState') == 'loaded' and lifetime.get('ActiveState') == 'active' and
+            lifetime.get('ControlGroup') == '/github.slice/github-runner.slice/' + guard and
+            lifetime.get('Slice') == 'github-runner.slice' and int(lifetime.get('MainPID', '0')) > 1, 'CI lifetime guard is inactive')
+    require(os.readlink('/proc/self/ns/net') != os.readlink('/proc/1/ns/net') and
+            {name for _, name in socket.if_nameindex()} == {'lo'}, 'CI network namespace is not isolated')
+    require(os.readlink('/proc/self/ns/mnt') != os.readlink('/proc/1/ns/mnt'), 'CI mount namespace is not isolated')

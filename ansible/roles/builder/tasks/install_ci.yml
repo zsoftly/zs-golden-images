@@ -1,4 +1,11 @@
 ---
+- name: Require explicit staged CI native inputs and capacity policy
+  ansible.builtin.assert:
+    that:
+      - golden_builder_ci_native_site is match('^/[A-Za-z0-9_./-]+\.json$')
+      - golden_builder_ci_lxc_id_base | int >= 65536
+      - golden_builder_ci_lxc_id_base | int + 65536 <= 4294967295
+      - golden_builder_ci_min_free_bytes | int > 0
 - name: Create protected dispatcher state and approval directories
   ansible.builtin.file:
     path: "{{ item }}"
@@ -10,6 +17,7 @@
     - "{{ golden_builder_prefix }}/ci"
     - "{{ golden_builder_prefix }}/ci/evidence"
     - "{{ golden_builder_prefix }}/ci/inputs"
+    - "{{ golden_builder_prefix }}/ci/operations"
     - /etc/zs-golden-images/ci-requests
 - name: Install the guarded dispatcher without granting runner privileges
   ansible.builtin.copy:
@@ -31,4 +39,4 @@
     owner: root
     group: root
     mode: '0600'
-    content: "{{ {'project': golden_builder_prefix + '/project', 'state': golden_builder_prefix + '/ci', 'workspace': golden_builder_workspace} | to_nice_json }}\n"
+    content: "{{ {'project': golden_builder_prefix + '/project', 'state': golden_builder_prefix + '/ci', 'workspace': golden_builder_workspace, 'native_site': golden_builder_ci_native_site, 'lxc_id_base': golden_builder_ci_lxc_id_base | int, 'min_free_bytes': golden_builder_ci_min_free_bytes | int} | to_nice_json }}\n"

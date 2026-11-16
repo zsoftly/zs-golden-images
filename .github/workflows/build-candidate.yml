@@ -18,25 +18,189 @@ permissions:
   contents: read
 
 concurrency:
-  group: golden-image-candidate
+  group: golden-image-candidate-${{ inputs.profile }}-${{ inputs.target }}
   cancel-in-progress: false
 
 jobs:
-  build:
+  preflight:
+    name: Preflight
     if: github.repository == 'zsoftly/zs-golden-images' && github.ref == 'refs/heads/main'
     runs-on: [self-hosted, Linux, zsoftly-image-build, zsoftly-yow-comp-14]
-    timeout-minutes: 390
+    timeout-minutes: 30
+    outputs:
+      binding: ${{ steps.stage.outputs.binding }}
     steps:
-      - name: Request the installed guarded builder
+      - name: Run the approved preflight stage
+        id: stage
         shell: bash
         env:
           IMAGE_PROFILE: ${{ inputs.profile }}
           IMAGE_TARGET: ${{ inputs.target }}
         run: |
           set -euo pipefail
-          if ! sudo -n -- /opt/zs-golden-images/bin/dispatch-candidate \
-            "$IMAGE_PROFILE" "$IMAGE_TARGET" >/dev/null 2>&1; then
-            echo 'Candidate request failed. The operator must inspect private builder evidence and invocation permissions.'
+          if ! binding=$(sudo -n -- /opt/zs-golden-images/bin/dispatch-candidate preflight \
+            "$IMAGE_PROFILE" "$IMAGE_TARGET" 2>/dev/null); then
+            echo 'Candidate preflight failed. The operator must inspect private evidence and invocation permissions.'
             exit 1
           fi
-          echo 'Experimental candidate built and inspected. Native tests, platform compatibility and release acceptance remain outstanding.'
+          if [[ ! "$binding" =~ ^[0-9a-f]{64}$ ]]; then
+            echo 'Candidate stage returned an invalid binding.'
+            exit 1
+          fi
+          printf 'binding=%s\n' "$binding" >> "$GITHUB_OUTPUT"
+          echo 'Candidate preflight passed.'
+
+  build:
+    name: Build
+    if: github.repository == 'zsoftly/zs-golden-images' && github.ref == 'refs/heads/main'
+    needs: [preflight]
+    runs-on: [self-hosted, Linux, zsoftly-image-build, zsoftly-yow-comp-14]
+    timeout-minutes: 390
+    outputs:
+      binding: ${{ steps.stage.outputs.binding }}
+    steps:
+      - name: Run the approved build stage
+        id: stage
+        shell: bash
+        env:
+          IMAGE_PROFILE: ${{ inputs.profile }}
+          IMAGE_TARGET: ${{ inputs.target }}
+          EXPECTED_BINDING: ${{ needs.preflight.outputs.binding }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$EXPECTED_BINDING" =~ ^[0-9a-f]{64}$ ]]; then
+            echo 'Candidate chain is missing its preflight binding.'
+            exit 1
+          fi
+          if ! binding=$(sudo -n -- /opt/zs-golden-images/bin/dispatch-candidate build \
+            "$IMAGE_PROFILE" "$IMAGE_TARGET" 2>/dev/null); then
+            echo 'Candidate build failed. The operator must inspect private evidence and invocation permissions.'
+            exit 1
+          fi
+          if [[ ! "$binding" =~ ^[0-9a-f]{64}$ ]]; then
+            echo 'Candidate stage returned an invalid binding.'
+            exit 1
+          fi
+          if [[ "$binding" != "$EXPECTED_BINDING" ]]; then
+            echo 'Candidate approval changed between stages; this workflow chain cannot pass.'
+            exit 1
+          fi
+          printf 'binding=%s\n' "$binding" >> "$GITHUB_OUTPUT"
+          echo 'Candidate build passed.'
+
+  inspect:
+    name: Inspect
+    if: github.repository == 'zsoftly/zs-golden-images' && github.ref == 'refs/heads/main'
+    needs: [preflight, build]
+    runs-on: [self-hosted, Linux, zsoftly-image-build, zsoftly-yow-comp-14]
+    timeout-minutes: 30
+    outputs:
+      binding: ${{ steps.stage.outputs.binding }}
+    steps:
+      - name: Run the approved inspect stage
+        id: stage
+        shell: bash
+        env:
+          IMAGE_PROFILE: ${{ inputs.profile }}
+          IMAGE_TARGET: ${{ inputs.target }}
+          EXPECTED_BINDING: ${{ needs.preflight.outputs.binding }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$EXPECTED_BINDING" =~ ^[0-9a-f]{64}$ ]]; then
+            echo 'Candidate chain is missing its preflight binding.'
+            exit 1
+          fi
+          if ! binding=$(sudo -n -- /opt/zs-golden-images/bin/dispatch-candidate inspect \
+            "$IMAGE_PROFILE" "$IMAGE_TARGET" 2>/dev/null); then
+            echo 'Candidate inspect failed. The operator must inspect private evidence and invocation permissions.'
+            exit 1
+          fi
+          if [[ ! "$binding" =~ ^[0-9a-f]{64}$ ]]; then
+            echo 'Candidate stage returned an invalid binding.'
+            exit 1
+          fi
+          if [[ "$binding" != "$EXPECTED_BINDING" ]]; then
+            echo 'Candidate approval changed between stages; this workflow chain cannot pass.'
+            exit 1
+          fi
+          printf 'binding=%s\n' "$binding" >> "$GITHUB_OUTPUT"
+          echo 'Candidate inspect passed.'
+
+  smoke:
+    name: Smoke
+    if: github.repository == 'zsoftly/zs-golden-images' && github.ref == 'refs/heads/main'
+    needs: [preflight, build, inspect]
+    runs-on: [self-hosted, Linux, zsoftly-image-build, zsoftly-yow-comp-14]
+    timeout-minutes: 180
+    outputs:
+      binding: ${{ steps.stage.outputs.binding }}
+    steps:
+      - name: Run the approved smoke stage
+        id: stage
+        shell: bash
+        env:
+          IMAGE_PROFILE: ${{ inputs.profile }}
+          IMAGE_TARGET: ${{ inputs.target }}
+          EXPECTED_BINDING: ${{ needs.preflight.outputs.binding }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$EXPECTED_BINDING" =~ ^[0-9a-f]{64}$ ]]; then
+            echo 'Candidate chain is missing its preflight binding.'
+            exit 1
+          fi
+          if ! binding=$(sudo -n -- /opt/zs-golden-images/bin/dispatch-candidate smoke \
+            "$IMAGE_PROFILE" "$IMAGE_TARGET" 2>/dev/null); then
+            echo 'Candidate smoke failed. The operator must inspect private evidence and invocation permissions.'
+            exit 1
+          fi
+          if [[ ! "$binding" =~ ^[0-9a-f]{64}$ ]]; then
+            echo 'Candidate stage returned an invalid binding.'
+            exit 1
+          fi
+          if [[ "$binding" != "$EXPECTED_BINDING" ]]; then
+            echo 'Candidate approval changed between stages; this workflow chain cannot pass.'
+            exit 1
+          fi
+          printf 'binding=%s\n' "$binding" >> "$GITHUB_OUTPUT"
+          echo 'Candidate smoke passed.'
+
+  summary:
+    name: Candidate outcome
+    if: always() && github.repository == 'zsoftly/zs-golden-images' && github.ref == 'refs/heads/main'
+    needs: [preflight, build, inspect, smoke]
+    runs-on: [self-hosted, Linux, zsoftly-image-build, zsoftly-yow-comp-14]
+    timeout-minutes: 5
+    steps:
+      - name: Report safe stage outcomes
+        shell: bash
+        env:
+          PREFLIGHT_RESULT: ${{ needs.preflight.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          INSPECT_RESULT: ${{ needs.inspect.result }}
+          SMOKE_RESULT: ${{ needs.smoke.result }}
+        run: |
+          set -euo pipefail
+          passed=true
+          {
+            echo '## Experimental candidate'
+            for stage in preflight build inspect smoke; do
+              case "$stage" in
+                preflight) result=$PREFLIGHT_RESULT ;;
+                build) result=$BUILD_RESULT ;;
+                inspect) result=$INSPECT_RESULT ;;
+                smoke) result=$SMOKE_RESULT ;;
+              esac
+              case "$result" in
+                success|failure|cancelled|skipped) ;;
+                *) result=unavailable ;;
+              esac
+              printf -- '- %s: %s\n' "$stage" "$result"
+              [[ "$result" == success ]] || passed=false
+            done
+            echo
+            if [[ "$passed" == true ]]; then
+              echo 'Native-tested candidate. Platform compatibility, full CIS coverage and release acceptance remain outstanding.'
+            else
+              echo 'Candidate pipeline incomplete. The operator must inspect private evidence before retrying.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
