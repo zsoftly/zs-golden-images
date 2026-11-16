@@ -1,0 +1,306 @@
+---
+- name: Demonstrate scoped golden-image build egress before image execution
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  serial: 1
+  vars:
+    golden_public_dns: 1.1.1.1
+    golden_fixture_port: 49181
+    golden_build_profile: debian-13
+    golden_build_target: cloudstack-kvm
+    golden_probe_root: "{{ golden_ci_state }}/evidence/egress-{{ golden_egress_run_id }}"
+    golden_resolver_file: "{{ golden_ci_state }}/inputs/egress-{{ golden_egress_run_id }}.resolv.conf"
+    golden_fixture_unit: "zs-golden-fixture-{{ golden_egress_run_id }}"
+    golden_keyrings:
+      debian-13: /usr/share/keyrings/debian-archive-keyring.gpg
+      ubuntu-26.04: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+  tasks:
+    - name: Require explicit probe inputs and a new run identity
+      ansible.builtin.assert:
+        that:
+          - not ansible_check_mode
+          - golden_egress_run_id is match('^[a-z0-9][a-z0-9-]{5,39}$')
+          - golden_probe_sources | length > 0
+          - golden_build_profile in golden_keyrings
+          - golden_ci_guard_unit == 'zs-golden-guard-' + golden_egress_run_id + '.service'
+          - golden_build_version is match('^[0-9]{8}(-[a-z0-9][a-z0-9.-]*)?$')
+          - golden_expected_commit is match('^[0-9a-f]{40}$')
+          - golden_build_target in ['cloudstack-kvm', 'proxmox-lxc']
+          - golden_build_site is match('^/[A-Za-z0-9_./-]+\.json$')
+          - golden_fixture_port | int >= 49152
+          - golden_fixture_port | int <= 65535
+    - name: Require reviewed official source metadata
+      ansible.builtin.assert:
+        that:
+          - item.profile in golden_keyrings
+          - item.url is match('^https://snapshot\.(debian\.org|ubuntu\.com)/[A-Za-z0-9_./+-]+/InRelease$')
+          - item.sha256 is match('^[a-f0-9]{64}$')
+      loop: "{{ golden_probe_sources }}"
+    - name: Inspect namespace-local resolver prerequisites
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import ipaddress, pathlib, sys
+            address = ipaddress.ip_address(sys.argv[1])
+            if not address.is_global:
+                raise SystemExit('The probe requires a public DNS address')
+            hosts = [line.split(':', 1)[1].split('#', 1)[0].split()
+                     for line in pathlib.Path('/etc/nsswitch.conf').read_text().splitlines()
+                     if line.startswith('hosts:')]
+            if hosts != [['files', 'dns']]:
+                raise SystemExit('Review changed NSS hosts lookup before relying on a private resolv.conf')
+          - "{{ golden_public_dns }}"
+      changed_when: false
+    - name: Record the host resolver before namespace-local mounts
+      ansible.builtin.stat:
+        path: /etc/resolv.conf
+        follow: true
+        checksum_algorithm: sha256
+      register: golden_host_resolver_before
+    - name: Inspect the proposed evidence directory
+      ansible.builtin.stat:
+        path: "{{ golden_probe_root }}"
+        follow: false
+      register: golden_probe_existing
+    - name: Inspect fixture unit identity before creating it
+      ansible.builtin.command:
+        argv: [systemctl, show, "{{ golden_fixture_unit }}.service", --property=LoadState, --value]
+      register: golden_fixture_existing
+      changed_when: false
+      failed_when: golden_fixture_existing.rc not in [0, 1, 4]
+    - name: Refuse to reuse evidence or an existing fixture service
+      ansible.builtin.assert:
+        that:
+          - not golden_probe_existing.stat.exists
+          - golden_fixture_existing.stdout | trim == 'not-found'
+    - name: Create protected operational directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+      loop:
+        - "{{ golden_ci_state }}/inputs"
+        - "{{ golden_probe_root }}"
+        - "{{ golden_probe_root }}/fixture"
+    - name: Write the public resolver file for the unit mount namespace
+      ansible.builtin.copy:
+        dest: "{{ golden_resolver_file }}"
+        content: "nameserver {{ golden_public_dns }}\noptions timeout:2 attempts:2\n"
+        owner: root
+        group: root
+        mode: '0644'
+    - name: Resolve source addresses through the same private public DNS path
+      ansible.builtin.command:
+        argv:
+          - systemd-run
+          - --quiet
+          - --wait
+          - --pipe
+          - --collect
+          - "--unit=zs-golden-resolve-{{ golden_egress_run_id }}"
+          - --property=Type=exec
+          - --property=Slice=github-runner.slice
+          - "--property=BindsTo={{ golden_ci_guard_unit }}"
+          - "--property=After={{ golden_ci_guard_unit }}"
+          - --property=KillMode=control-group
+          - --property=TimeoutStopSec=15
+          - --property=RuntimeMaxSec=30
+          - --property=IPAddressDeny=any
+          - "--property=IPAddressAllow={{ golden_public_dns }}"
+          - "--property=BindReadOnlyPaths={{ golden_resolver_file }}:/etc/resolv.conf"
+          - /usr/bin/python3
+          - -c
+          - |
+            import ipaddress, json, socket, sys
+            records = {}
+            for host in sys.argv[1:]:
+                addresses = sorted({entry[4][0] for entry in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)})
+                if not addresses or any(not ipaddress.ip_address(value).is_global for value in addresses):
+                    raise SystemExit('Missing or non-public source address: ' + host)
+                records[host] = addresses
+            print(json.dumps(records, sort_keys=True))
+          - snapshot.debian.org
+          - snapshot.ubuntu.com
+      register: golden_source_resolution
+      changed_when: false
+    - name: Establish the scoped allow-list
+      ansible.builtin.set_fact:
+        golden_allowed_ips: "{{ ((golden_source_resolution.stdout | from_json).values() | list | flatten + [golden_public_dns]) | unique | sort }}"
+    - name: Write the local connectivity fixture
+      ansible.builtin.copy:
+        dest: "{{ golden_probe_root }}/fixture/probe.txt"
+        content: "{{ golden_egress_run_id }}\n"
+        owner: root
+        group: root
+        mode: '0600'
+    - name: Prepare the shared per-service properties
+      ansible.builtin.set_fact:
+        golden_unit_properties:
+          - --property=Type=exec
+          - --property=Slice=github-runner.slice
+          - "--property=BindsTo={{ golden_ci_guard_unit }}"
+          - "--property=After={{ golden_ci_guard_unit }}"
+          - --property=KillMode=control-group
+          - --property=TimeoutStopSec=15
+          - --property=IPAddressDeny=any
+          - "--property=IPAddressAllow={{ golden_allowed_ips | join(' ') }}"
+          - "--property=BindReadOnlyPaths={{ golden_resolver_file }}:/etc/resolv.conf"
+          - --property=MemoryHigh=22G
+          - --property=MemoryMax=24G
+          - --property=MemorySwapMax=2G
+          - --property=CPUQuota=300%
+    - name: Prove DNS and HTTP boundaries with a bounded disposable fixture
+      block:
+        - name: Start only the temporary loopback fixture
+          ansible.builtin.command:
+            argv:
+              - systemd-run
+              - --quiet
+              - --collect
+              - "--unit={{ golden_fixture_unit }}"
+              - --property=Type=exec
+              - --property=Slice=github-runner.slice
+              - "--property=BindsTo={{ golden_ci_guard_unit }}"
+              - "--property=After={{ golden_ci_guard_unit }}"
+              - --property=KillMode=control-group
+              - --property=TimeoutStopSec=15
+              - --property=RuntimeMaxSec=600
+              - /usr/bin/python3
+              - -m
+              - http.server
+              - "{{ golden_fixture_port | string }}"
+              - --bind
+              - 127.0.0.1
+              - --directory
+              - "{{ golden_probe_root }}/fixture"
+          changed_when: true
+        - name: Verify the fixture is reachable without the restricted unit
+          ansible.builtin.uri:
+            url: "http://127.0.0.1:{{ golden_fixture_port }}/probe.txt"
+            return_content: true
+            use_proxy: false
+            timeout: 5
+          register: golden_fixture_before
+          until: golden_fixture_before.status | default(0) == 200
+          retries: 5
+          delay: 1
+        - name: Verify the expected fixture body
+          ansible.builtin.assert:
+            that:
+              - golden_fixture_before.content | trim == golden_egress_run_id
+        - name: Verify public DNS responds inside the restricted unit
+          ansible.builtin.command:
+            argv: "{{ ['systemd-run', '--quiet', '--wait', '--pipe', '--collect', '--unit=zs-golden-dns-' + golden_egress_run_id, '--property=RuntimeMaxSec=20'] + golden_unit_properties + ['/usr/bin/python3', '-c', golden_dns_probe, golden_public_dns] }}"
+          vars:
+            golden_dns_probe: |
+              import ipaddress, secrets, socket, struct, sys
+              address = ipaddress.ip_address(sys.argv[1])
+              family = socket.AF_INET if address.version == 4 else socket.AF_INET6
+              query_id = secrets.randbelow(65536)
+              name = b''.join(bytes([len(part)]) + part.encode() for part in 'snapshot.debian.org'.split('.')) + b'\0'
+              query = struct.pack('!HHHHHH', query_id, 0x0100, 1, 0, 0, 0) + name + struct.pack('!HH', 1, 1)
+              with socket.socket(family, socket.SOCK_DGRAM) as client:
+                  client.settimeout(5)
+                  client.connect((str(address), 53))
+                  client.send(query)
+                  response = client.recv(4096)
+              received_id, flags, questions, answers, _, _ = struct.unpack('!HHHHHH', response[:12])
+              if received_id != query_id or not flags & 0x8000 or flags & 0x0200 or flags & 15 or questions != 1 or answers < 1:
+                  raise SystemExit('DNS did not return a successful matching response')
+              print('Public DNS response verified')
+          register: golden_dns_result
+          changed_when: false
+        - name: Verify loopback is denied inside the restricted unit
+          ansible.builtin.command:
+            argv: "{{ ['systemd-run', '--quiet', '--wait', '--pipe', '--collect', '--unit=zs-golden-denied-' + golden_egress_run_id, '--property=RuntimeMaxSec=20'] + golden_unit_properties + ['/usr/bin/curl', '--noproxy', '*', '--silent', '--show-error', '--fail', '--connect-timeout', '3', '--max-time', '5', 'http://127.0.0.1:' + (golden_fixture_port | string) + '/probe.txt'] }}"
+          register: golden_loopback_denied
+          changed_when: false
+          failed_when: golden_loopback_denied.rc not in [7, 28]
+        - name: Confirm the fixture stayed reachable outside the restricted unit
+          ansible.builtin.uri:
+            url: "http://127.0.0.1:{{ golden_fixture_port }}/probe.txt"
+            return_content: true
+            use_proxy: false
+            timeout: 5
+          register: golden_fixture_after
+        - name: Require the same live fixture after the denied request
+          ansible.builtin.assert:
+            that:
+              - golden_fixture_after.content | trim == golden_egress_run_id
+        - name: Fetch approved HTTPS metadata inside restricted units
+          ansible.builtin.command:
+            argv: "{{ ['systemd-run', '--quiet', '--wait', '--pipe', '--collect', '--unit=zs-golden-source-' + golden_egress_run_id + '-' + (source_index | string), '--property=RuntimeMaxSec=150'] + golden_unit_properties + ['/usr/bin/curl', '--noproxy', '*', '--fail', '--silent', '--show-error', '--proto', '=https', '--proto-redir', '=https', '--location', '--connect-timeout', '15', '--max-time', '120', item.url, '--output', golden_probe_root + '/source-' + (source_index | string) + '.InRelease'] }}"
+          loop: "{{ golden_probe_sources }}"
+          loop_control:
+            index_var: source_index
+          register: golden_source_fetch
+          changed_when: true
+        - name: Verify the fetched metadata checksums and archive signatures
+          ansible.builtin.command:
+            argv:
+              - python3
+              - -c
+              - |
+                import hashlib, pathlib, subprocess, sys
+                path = pathlib.Path(sys.argv[1])
+                if hashlib.sha256(path.read_bytes()).hexdigest() != sys.argv[2]:
+                    raise SystemExit('Metadata checksum differs from the reviewed source input')
+                subprocess.run(['gpgv', '--keyring', sys.argv[3], str(path)], check=True)
+              - "{{ golden_probe_root }}/source-{{ source_index }}.InRelease"
+              - "{{ item.sha256 }}"
+              - "{{ golden_keyrings[item.profile] }}"
+          loop: "{{ golden_probe_sources }}"
+          loop_control:
+            index_var: source_index
+          changed_when: false
+        - name: Bind the completed probe to the reviewed source and exact site inputs
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/python3
+              - -c
+              - |
+                import hashlib, json, pathlib, subprocess, sys, time
+                site, expected, version = sys.argv[1:4]
+                commit = subprocess.check_output(['git', '-C', sys.argv[4], 'rev-parse', 'HEAD'], text=True).strip()
+                assert commit == expected
+                assert not subprocess.check_output(['git', '-C', sys.argv[4], 'status', '--porcelain', '--untracked-files=all'], text=True).strip()
+                data = pathlib.Path(site).read_bytes()
+                assert json.loads(data)['version'] == version
+                print(json.dumps({'verified_at': int(time.time()), 'source_commit': commit,
+                                  'site_sha256': hashlib.sha256(data).hexdigest(),
+                                  'toolchain_sha256': hashlib.sha256(pathlib.Path('/etc/zs-golden-images/toolchain.json').read_bytes()).hexdigest()}))
+              - "{{ golden_build_site }}"
+              - "{{ golden_expected_commit }}"
+              - "{{ golden_build_version }}"
+              - "{{ golden_ci_project }}"
+          register: golden_probe_provenance
+          changed_when: false
+        - name: Preserve the verified boundary and exact attempt command
+          ansible.builtin.copy:
+            dest: "{{ golden_probe_root }}/result.json"
+            owner: root
+            group: root
+            mode: '0600'
+            content: "{{ {'provenance': (golden_probe_provenance.stdout | from_json), 'source_addresses': (golden_source_resolution.stdout | from_json), 'public_dns': golden_public_dns, 'unrestricted_loopback': 'passed', 'restricted_loopback': 'denied', 'restricted_loopback_exit': golden_loopback_denied.rc, 'restricted_dns': golden_dns_result.stdout, 'verified_sources': golden_probe_sources, 'build_executed': false, 'build_argv': (['systemd-run', '--quiet', '--wait', '--pipe', '--collect', '--unit=zs-golden-build-' + golden_egress_run_id, '--property=RuntimeMaxSec=6h', '--setenv=GOLDEN_APPLY=build'] + golden_unit_properties + [golden_ci_project + '/scripts/pipeline.sh', 'build', golden_build_profile, golden_build_target, golden_build_site])} | to_nice_json }}\n"
+      always:
+        - name: Stop only the disposable fixture even when a probe fails
+          ansible.builtin.command:
+            argv: [systemctl, stop, "{{ golden_fixture_unit }}.service"]
+          register: golden_fixture_cleanup
+          changed_when: golden_fixture_cleanup.rc == 0
+          failed_when: golden_fixture_cleanup.rc not in [0, 5]
+        - name: Inspect the host resolver after the temporary units
+          ansible.builtin.stat:
+            path: /etc/resolv.conf
+            follow: true
+            checksum_algorithm: sha256
+          register: golden_host_resolver_after
+        - name: Require the host resolver contents to remain unchanged
+          ansible.builtin.assert:
+            that:
+              - golden_host_resolver_after.stat.checksum == golden_host_resolver_before.stat.checksum

@@ -70,6 +70,8 @@ The pipeline rechecks repository metadata, records source and builder inputs, an
 
 ## Development and operational boundary
 
+The optional [manual CI workflow](docs/manual-ci.md) builds and inspects candidates through a root-owned approval registry. Installing its dispatcher does not grant runner privileges or enable Actions. Activation requires separate review of the fleet-owned invocation permission.
+
 Continue code, unit tests, static checks, Ansible roles, and setup documentation while infrastructure preparation is pending. The infrastructure owner supplies the dedicated server, private inventory, workspace filesystem, isolated network, and verified access. Obtain approval after that handoff before installing the builder or starting live image builds.
 
 Keep site configuration, credentials, raw audits, build logs, and acceptance evidence outside this public checkout. Generic images contain no organization staff keys, enrollment credentials, or enrolled Wazuh identity. Managed enrollment and access policy belong to authorized provisioning; customer images require customer-supplied settings or an explicit managed-service agreement.

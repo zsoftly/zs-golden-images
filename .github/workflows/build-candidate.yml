@@ -1,0 +1,42 @@
+name: Build an experimental image candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: OS profile
+        required: true
+        type: choice
+        options: [debian-13, ubuntu-26.04]
+      target:
+        description: Image target
+        required: true
+        type: choice
+        options: [cloudstack-kvm, proxmox-lxc]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: golden-image-candidate
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'zsoftly/zs-golden-images' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Linux, zsoftly-image-build, zsoftly-yow-comp-14]
+    timeout-minutes: 390
+    steps:
+      - name: Request the installed guarded builder
+        shell: bash
+        env:
+          IMAGE_PROFILE: ${{ inputs.profile }}
+          IMAGE_TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          if ! sudo -n -- /opt/zs-golden-images/bin/dispatch-candidate \
+            "$IMAGE_PROFILE" "$IMAGE_TARGET" >/dev/null 2>&1; then
+            echo 'Candidate request failed. The operator must inspect private builder evidence and invocation permissions.'
+            exit 1
+          fi
+          echo 'Experimental candidate built and inspected. Native tests, platform compatibility and release acceptance remain outstanding.'
