@@ -26,7 +26,8 @@ state=$(mktemp -d "$workspace/.ansible-rootfs.XXXXXXXX")
 trap 'rm -rf -- "$state"' EXIT
 jq -n --arg root "$rootfs" '{all:{hosts:{image:{ansible_connection:"community.general.chroot",ansible_host:$root,ansible_python_interpreter:"/usr/bin/python3"}}}}' > "$state/inventory.json"
 jq --arg phase "$phase" --arg profile "$profile" --arg target "$target" '{golden_phase:$phase,golden_profile:$profile,golden_target:$target,golden_source_commit:.source_commit,golden_source_image_sha256:.source_image_sha256,golden_source_image_url:.source_image_url,golden_source_kind:.source_kind,golden_image_version:.image_version}' "$metadata" > "$state/vars.json"
-ANSIBLE_COLLECTIONS_PATH=/opt/zs-golden-images/collections ANSIBLE_ROLES_PATH="$repo/ansible/roles" /opt/zs-golden-images/venv/bin/ansible-playbook -i "$state/inventory.json" "$repo/ansible/playbooks/30-configure-rootfs.yml" -e "@$state/vars.json"
+# DIB uses LC_ALL=C; scope the UTF-8 locale required by Ansible to this child.
+ANSIBLE_COLLECTIONS_PATH=/opt/zs-golden-images/collections ANSIBLE_ROLES_PATH="$repo/ansible/roles" LANG=C.UTF-8 LC_ALL=C.UTF-8 /opt/zs-golden-images/venv/bin/ansible-playbook -i "$state/inventory.json" "$repo/ansible/playbooks/30-configure-rootfs.yml" -e "@$state/vars.json"
 if [[ "$phase" == cleanup ]]; then
   # Run after Ansible exits so removing its temporary files cannot disrupt a module.
   chroot "$rootfs" /bin/sh -s <<'CLEAN_ANSIBLE'
