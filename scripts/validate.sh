@@ -37,7 +37,7 @@ except ImportError as exc:
 for directory in (Path("scripts"), Path("tests")):
     for source in directory.rglob("*.py"):
         ast.parse(source.read_text(), filename=str(source))
-for directory in (Path("ansible"), Path("builders"), Path("config"), Path("audit")):
+for directory in (Path("ansible"), Path("builders"), Path("config"), Path("audit"), Path(".github")):
     for source in directory.rglob("*"):
         if not source.is_file():
             continue

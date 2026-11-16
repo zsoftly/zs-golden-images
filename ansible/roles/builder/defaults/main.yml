@@ -3,6 +3,7 @@ golden_builder_approved: false
 golden_builder_region: ''
 golden_builder_workspace: ''
 golden_builder_prefix: /opt/zs-golden-images
+golden_builder_install_ci_dispatcher: false
 golden_builder_ansible_version: 2.20.4
 golden_builder_go_version: 1.25.12
 golden_builder_go_sha256: 234828b7a89e0e303d2556310ee549fbcf253d28de937bac3da13d6294262ac1

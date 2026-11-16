@@ -1,0 +1,4 @@
+self-hosted-runner:
+  labels:
+    - zsoftly-image-build
+    - zsoftly-yow-comp-14

@@ -61,6 +61,7 @@
       - ubuntu-keyring
       - rsync
       - sudo
+      - procps
       - gnupg
       - gpgv
       - squashfs-tools
@@ -269,3 +270,6 @@
     group: root
     mode: '0600'
     content: "{{ golden_builder_pins | combine({'executables': {'diskimage_builder': golden_executables.results[0].stat.checksum, 'distrobuilder': golden_executables.results[1].stat.checksum}, 'python_lock_sha256': golden_dependency_records.results[0].stat.checksum, 'python_inventory_sha256': golden_dependency_records.results[1].stat.checksum, 'go_version': golden_go_identity.stdout, 'ansible_version': golden_ansible_identity.stdout_lines[0], 'collections': (golden_collection_integrity.stdout | from_json)}) | to_nice_json }}\n"
+- name: Prepare optional manual CI entry point
+  ansible.builtin.include_tasks: install_ci.yml
+  when: golden_builder_install_ci_dispatcher | bool
