@@ -201,6 +201,87 @@ class NativeArchiveTests(unittest.TestCase):
                         lxc_smoke.unused_id_range(base)
 
 
+class NativeCIContextTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.site_path = self.root / 'native-site.json'
+        self.site_path.write_text('{"fixture":true}')
+        self.candidate = self.root / 'candidate.json'
+        self.candidate.write_text(json.dumps({'source_commit': 'a' * 40, 'target': 'cloudstack-kvm'}))
+        self.site = SimpleNamespace(tool_prefix=self.root, source_commit='a' * 40, site_path=self.site_path)
+        self.context_path = self.root / 'ci/evidence/attempt/context.json'
+        self.context_path.parent.mkdir(parents=True)
+        self.unit = 'zs-golden-smoke-ci-' + 'b' * 24 + '-1.service'
+        self.guard = 'zs-golden-guard-ci-' + 'b' * 24 + '.service'
+        self.group = '/github.slice/github-runner.slice/' + self.unit
+        self.context = {'schema_version': 1, 'candidate': str(self.candidate), 'candidate_sha256': common.digest(self.candidate),
+                        'source_commit': self.site.source_commit, 'site_path': str(self.site_path),
+                        'site_sha256': common.digest(self.site_path), 'unit': self.unit, 'guard_unit': self.guard,
+                        'operation_binding': 'c' * 64}
+        self.active = {'Id': self.unit, 'LoadState': 'loaded', 'ActiveState': 'active', 'ControlGroup': self.group,
+                       'Slice': 'github-runner.slice', 'BindsTo': self.guard, 'After': self.guard,
+                       'PrivateNetwork': 'yes', 'KillMode': 'control-group', 'Delegate': 'no'}
+        self.lifetime = {'Id': self.guard, 'LoadState': 'loaded', 'ActiveState': 'active', 'MainPID': '123',
+                         'Slice': 'github-runner.slice', 'ControlGroup': '/github.slice/github-runner.slice/' + self.guard}
+
+    def check(self, group=None, interfaces=None, shared_ns=False):
+        self.context_path.write_text(json.dumps(self.context)); self.context_path.chmod(0o600)
+        original_read = Path.read_text
+        def read(path, *args, **kwargs):
+            return '0::' + (group or self.group) + '\n' if str(path) == '/proc/self/cgroup' else original_read(path, *args, **kwargs)
+        def namespace(path):
+            return 'namespace:1' if shared_ns or '/1/' in path else 'namespace:2'
+        states = [SimpleNamespace(returncode=0, stdout='\n'.join(k + '=' + v for k, v in data.items()))
+                  for data in (self.active, self.lifetime)]
+        with patch.object(common, 'protected'), patch.object(Path, 'read_text', read), \
+             patch.object(common, 'run', side_effect=states), patch.object(common.os, 'readlink', side_effect=namespace), \
+             patch.object(common.socket, 'if_nameindex', return_value=interfaces or [(1, 'lo')]):
+            common.require_runner_context('unused-manual-service', self.context_path, self.site, self.candidate)
+
+    def test_manual_path_still_requires_drained_runner(self):
+        with patch.object(common, 'require_drained') as drained:
+            common.require_runner_context('runner.service', None, self.site, self.candidate)
+        drained.assert_called_once_with('runner.service')
+
+    def test_exact_owned_isolated_unit_accepts_context_without_github_environment(self):
+        with patch.dict(os.environ, {'GITHUB_REPOSITORY': 'untrusted/other', 'GITHUB_REF': 'refs/pull/1/head'}):
+            self.check()
+
+    def test_wrong_context_binding_cannot_authorize_helper(self):
+        original = dict(self.context)
+        for change in ({'candidate_sha256': 'd' * 64}, {'source_commit': 'd' * 40}, {'site_sha256': 'd' * 64},
+                       {'candidate': '/other/candidate.json'}, {'unit': 'other.service'}, {'guard_unit': 'foreign.service'},
+                       {'operation_binding': 'not-a-digest'}, {'extra': 'field'}):
+            self.context = original | change
+            with self.subTest(change=change), self.assertRaises(RuntimeError):
+                self.check()
+
+    def test_foreign_cgroup_or_dead_guard_or_missing_isolation_is_refused(self):
+        for kwargs in ({'group': '/system.slice/other.service'}, {'interfaces': [(1, 'lo'), (2, 'eth0')]}, {'shared_ns': True}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(RuntimeError):
+                self.check(**kwargs)
+        original = dict(self.active)
+        for change in ({'PrivateNetwork': 'no'}, {'BindsTo': ''}, {'After': ''}, {'Slice': 'system.slice'},
+                       {'KillMode': 'process'}, {'ControlGroup': '/system.slice/other.service'}):
+            self.active = original | change
+            with self.subTest(change=change), self.assertRaises(RuntimeError):
+                self.check()
+        self.active = original
+        self.lifetime['ActiveState'] = 'inactive'
+        with self.assertRaisesRegex(RuntimeError, 'guard is inactive'):
+            self.check()
+
+    def test_lxc_requires_actual_delegated_cgroup(self):
+        self.candidate.write_text(json.dumps({'source_commit': 'a' * 40, 'target': 'proxmox-lxc'}))
+        self.context['candidate_sha256'] = common.digest(self.candidate)
+        with self.assertRaisesRegex(RuntimeError, 'delegation'):
+            self.check()
+        self.active['Delegate'] = 'yes'
+        self.check()
+
+
 class NativeGuestTests(unittest.TestCase):
     def test_qga_async_execution_retains_pid_until_exit(self):
         responses = [{'pid': 12}, {'exited': False},

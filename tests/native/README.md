@@ -1,6 +1,6 @@
 # Native candidate smoke tests
 
-These helpers test existing candidates with upstream QEMU/KVM and LXC. They do not assemble images or import templates. Run them only on the approved dedicated builder, after draining its existing runner and confirming no job remains. They refuse a Proxmox host, require root Linux execution with `GOLDEN_APPLY=smoke`, and hold the same workspace lock as the image pipeline. The surrounding operational playbook owns runner restoration and verifies that its guest processes have stopped first.
+These helpers test existing candidates with upstream QEMU/KVM and LXC. They do not assemble images or import templates. Run them only on the approved dedicated builder. Direct manual use requires draining its existing runner and confirming no job remains. They refuse a Proxmox host, require root Linux execution with `GOLDEN_APPLY=smoke`, and hold the same workspace lock as the image pipeline. The surrounding manual operational playbook owns runner restoration and verifies that its guest processes have stopped first. The staged CI dispatcher instead supplies a protected `--ci-context` bound to the candidate, source, native site and owned lifetime guard; the helper verifies its isolated cgroup and namespaces before allowing the active-runner CI path. The context option is not a general drain bypass.
 
 Keep the source checkout root-owned, protected, clean and committed. The report records its commit. Invoke these files from that checkout so they reuse its runtime playbooks. The helpers do not install tools or change fleet configuration, host networking, subordinate-ID allocations or global AppArmor settings.
 
@@ -14,7 +14,7 @@ Supply `--site` with an absolute path to a root-owned mode-0600 JSON file outsid
 | `evidence` | Existing protected directory for private test results. |
 | `tool_prefix` | Existing protected prefix installed by the builder Ansible role, containing `venv/` and `collections/`. |
 | `builder_marker` | Existing protected JSON marker written by bootstrap, with purpose `isolated-image-builder`, region `yow` and the same workspace. |
-| `runner_service` | Exact existing `actions.runner.…service` from private fleet inventory. It must resolve to that exact loaded, inactive service. There is no default. |
+| `runner_service` | Exact existing `actions.runner.…service` from private fleet inventory. Manual use requires that exact loaded, inactive service; guarded CI uses the dispatcher context described above. There is no default. |
 
 Site paths use only letters, numbers, `/`, `_`, `.` and `-`, excluding CLI option separators. Paths and their parents must be root-owned, without symlinks or group/other write permission. The candidate artifact must remain inside the configured workspace. Each evidence run must be a new direct child of the configured evidence directory, with a name containing only letters, numbers, `_` and `-`. Keep VM run names short because Unix socket paths are limited.
 

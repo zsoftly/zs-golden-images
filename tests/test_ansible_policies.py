@@ -425,8 +425,10 @@ class ImagePolicyTests(unittest.TestCase):
 
     def test_candidate_carries_verified_toolchain_inventory(self):
         pipeline = (ROOT / 'scripts/pipeline.sh').read_text()
-        self.assertIn("installed.get('python_lock_sha256')", pipeline)
-        self.assertIn("installed.get('python_inventory_sha256')", pipeline)
+        toolchain = (ROOT / 'scripts/verify-toolchain.py').read_text()
+        self.assertIn('python3 "$repo/scripts/verify-toolchain.py"', pipeline)
+        self.assertIn("installed.get('python_lock_sha256')", toolchain)
+        self.assertIn("installed.get('python_inventory_sha256')", toolchain)
         self.assertIn('toolchain:$toolchain[0]', pipeline)
 
     def test_cloud_init_runtime_wait_has_deadline(self):

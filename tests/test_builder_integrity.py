@@ -221,7 +221,9 @@ class NativeBuilderPolicy(unittest.TestCase):
             self.assertIn(option, tasks)
         pipeline = (REPO / "scripts/pipeline.sh").read_text()
         self.assertIn("PYTHONDONTWRITEBYTECODE=1", pipeline)
-        self.assertIn("module.inventory('/opt/zs-golden-images/collections', pins)", pipeline)
+        self.assertIn('python3 "$repo/scripts/verify-toolchain.py"', pipeline)
+        self.assertIn("module.inventory('/opt/zs-golden-images/collections', pins)",
+                      (REPO / 'scripts/verify-toolchain.py').read_text())
 
     def test_lxc_configuration_uses_private_mounts_before_native_pack(self):
         pipeline = (REPO / "scripts/pipeline.sh").read_text()

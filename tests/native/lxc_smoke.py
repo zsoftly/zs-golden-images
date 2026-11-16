@@ -17,7 +17,7 @@ import tarfile
 import time
 
 import common as vm
-from common import digest, load_site, protected, require, require_drained, require_stable, require_unique, run, write_json
+from common import digest, load_site, protected, require, require_runner_context, require_stable, require_unique, run, write_json
 
 
 def unused_id_range(base):
@@ -100,6 +100,7 @@ def extract(artifact, rootfs, base):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--site', type=Path, required=True, help='Private native smoke site JSON')
+    parser.add_argument('--ci-context', type=Path, help='Protected dispatcher context; manual calls still require a drained runner')
     parser.add_argument('candidate', type=Path)
     parser.add_argument('evidence_run', type=Path)
     parser.add_argument('--id-base', type=int, required=True, help='Explicit unused host UID/GID start; validated before use')
@@ -117,7 +118,7 @@ def main():
     protected(args.candidate)
     require(args.candidate.is_absolute() and args.candidate.is_file(), 'Invalid candidate path')
     require(args.evidence_run.parent == site.evidence and re.fullmatch('[A-Za-z0-9_-]+', args.evidence_run.name) and not args.evidence_run.exists(), 'Use a new direct evidence child with a simple name')
-    require_drained(site.runner_service)
+    require_runner_context(site.runner_service, args.ci_context, site, args.candidate)
     lockfd = os.open(site.workspace / '.build.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     info = os.fstat(lockfd)
     require(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022, 'Unsafe build lock')
@@ -138,7 +139,8 @@ def main():
         previous = json.loads(args.compare_report.read_text())
         require(previous.get('scope') == 'native-lxc-one-clone-smoke-only' and previous.get('status') == 'passed' and
                 previous.get('container_stopped') is True and previous.get('original_artifact_unchanged') is True and
-                previous.get('artifact_sha256') == original, 'Prior report must be successful for the same unchanged artifact')
+                previous.get('artifact_sha256') == original and previous.get('candidate_sha256') == digest(args.candidate) and
+                previous.get('test_source_commit') == site.source_commit, 'Prior report must be successful for the same unchanged candidate and source')
     evidence = args.evidence_run
     evidence.mkdir(mode=0o700)
     report = {'schema_version': 1, 'scope': 'native-lxc-one-clone-smoke-only', 'status': 'failed',
