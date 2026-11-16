@@ -1,0 +1,14 @@
+{
+  "diskimage_builder": {
+    "version": "3.44.0",
+    "commit": "cc4081122f547c921915e7e3787cf44f10691c4d",
+    "repository": "https://github.com/openstack/diskimage-builder",
+    "license": "Apache-2.0"
+  },
+  "distrobuilder": {
+    "version": "3.4.0",
+    "commit": "3aa171971097eb033f187e7f75ac492c8283512c",
+    "repository": "https://github.com/lxc/distrobuilder",
+    "license": "Apache-2.0"
+  }
+}

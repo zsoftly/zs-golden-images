@@ -1,0 +1,100 @@
+---
+- name: Replace temporary LXC root-key access with a verified administrator
+  hosts: golden_candidates
+  become: true
+  gather_facts: true
+  pre_tasks:
+    - name: Require approved per-instance inputs
+      ansible.builtin.assert:
+        that:
+          - lookup('ansible.builtin.env', 'GOLDEN_APPLY') == 'provision-admin'
+          - golden_runtime_approved | default(false) | bool
+          - ansible_facts.virtualization_type == 'lxc'
+          - golden_admin_user is match('^[a-z][a-z0-9_-]{0,30}$')
+          - golden_admin_user != 'root'
+          - golden_admin_public_key is match('^ssh-ed25519 [A-Za-z0-9+/]+=*( .*)?$')
+          - golden_admin_private_key_file is match('^/')
+          - golden_admin_ssh_host is match('^[A-Za-z0-9.:-]+$')
+          - golden_admin_known_hosts_file is match('^/')
+          - golden_admin_sudo_commands | length > 0
+      no_log: true
+  tasks:
+    - name: Create the explicitly selected instance administrator
+      ansible.builtin.user:
+        name: "{{ golden_admin_user }}"
+        shell: /bin/bash
+        create_home: true
+        password_lock: true
+    - name: Create private administrator SSH directory
+      ansible.builtin.file:
+        path: "/home/{{ golden_admin_user }}/.ssh"
+        state: directory
+        owner: "{{ golden_admin_user }}"
+        group: "{{ golden_admin_user }}"
+        mode: '0700'
+    - name: Install the per-instance public key
+      ansible.builtin.copy:
+        dest: "/home/{{ golden_admin_user }}/.ssh/authorized_keys"
+        content: "{{ golden_admin_public_key }}\n"
+        owner: "{{ golden_admin_user }}"
+        group: "{{ golden_admin_user }}"
+        mode: '0600'
+      no_log: true
+    - name: Install explicitly selected passwordless automation permissions
+      ansible.builtin.copy:
+        dest: "/etc/sudoers.d/90-{{ golden_admin_user }}"
+        owner: root
+        group: root
+        mode: '0440'
+        content: "{{ golden_admin_user }} ALL=(root) NOPASSWD: {{ golden_admin_sudo_commands }}\n"
+        validate: /usr/sbin/visudo -cf %s
+    - name: Read this candidate's runtime identity
+      ansible.builtin.slurp:
+        src: /etc/machine-id
+      register: golden_admin_candidate_identity
+    - name: Require a unique initialized machine identity
+      ansible.builtin.assert:
+        that:
+          - (golden_admin_candidate_identity.content | b64decode | trim) is match('^[0-9a-f]{32}$')
+    - name: Verify a fresh administrator SSH connection and root capability
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -o
+          - BatchMode=yes
+          - -o
+          - StrictHostKeyChecking=yes
+          - -o
+          - "UserKnownHostsFile={{ golden_admin_known_hosts_file }}"
+          - -o
+          - IdentitiesOnly=yes
+          - -o
+          - ConnectTimeout=15
+          - -o
+          - ControlMaster=no
+          - -o
+          - ControlPath=none
+          - -p
+          - "{{ ansible_port | default(22) | string }}"
+          - -i
+          - "{{ golden_admin_private_key_file }}"
+          - "{{ golden_admin_user }}@{{ golden_admin_ssh_host }}"
+          - sudo -n /usr/bin/id -u && /usr/bin/cat /etc/machine-id
+      delegate_to: localhost
+      become: false
+      register: golden_admin_connection
+      changed_when: false
+      failed_when: golden_admin_connection.rc != 0 or golden_admin_connection.stdout_lines != ['0', golden_admin_candidate_identity.content | b64decode | trim]
+      no_log: true
+    - name: Disable temporary root SSH only after recovery proof
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config.d/00-golden-images.conf
+        regexp: ^PermitRootLogin
+        line: PermitRootLogin no
+    - name: Validate the final SSH configuration
+      ansible.builtin.command: /usr/sbin/sshd -t
+      changed_when: false
+    - name: Reload SSH with verified administrator access
+      ansible.builtin.systemd_service:
+        name: ssh
+        state: reloaded

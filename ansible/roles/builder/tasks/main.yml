@@ -1,0 +1,270 @@
+---
+- name: Require an explicitly authorized dedicated bare-metal host
+  ansible.builtin.assert:
+    that:
+      - golden_builder_approved | bool
+      - lookup('ansible.builtin.env', 'GOLDEN_APPLY') == 'bootstrap'
+      - golden_builder_region == 'yow'
+      - ansible_facts.architecture == 'x86_64'
+      - ansible_facts.virtualization_role != 'guest'
+      - (ansible_facts.distribution == 'Debian' and ansible_facts.distribution_major_version == '13') or (ansible_facts.distribution == 'Ubuntu' and ansible_facts.distribution_version == '26.04')
+      - golden_builder_workspace is match('^/[^/]+/[^/]+/[^/]+(/[^/]+)*$')
+      - golden_builder_prefix == '/opt/zs-golden-images'
+      - not ansible_check_mode
+- name: Inspect the reserved workspace
+  ansible.builtin.stat:
+    path: "{{ golden_builder_workspace }}"
+    follow: false
+  register: golden_workspace
+- name: Inspect Proxmox host marker
+  ansible.builtin.stat:
+    path: /etc/pve
+  register: golden_proxmox
+- name: Require existing isolated root-owned workspace
+  ansible.builtin.assert:
+    that:
+      - golden_workspace.stat.exists
+      - golden_workspace.stat.isdir
+      - not golden_workspace.stat.islnk
+      - golden_workspace.stat.uid == 0
+      - golden_workspace.stat.mode in ['0700', '0750', '0755']
+      - not golden_proxmox.stat.exists
+- name: Verify workspace parents cannot redirect build writes
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import os, pathlib, stat, sys
+        p = pathlib.Path(sys.argv[1])
+        for part in [p, *p.parents]:
+            s = part.lstat()
+            if stat.S_ISLNK(s.st_mode) or s.st_uid != 0 or s.st_mode & 0o022:
+                raise SystemExit('Workspace ancestry must be root-owned and protected')
+      - "{{ golden_builder_workspace }}"
+  changed_when: false
+- name: Load committed builder pins
+  ansible.builtin.set_fact:
+    golden_builder_pins: "{{ lookup('ansible.builtin.file', playbook_dir + '/../../builders/pins.json') | from_json }}"
+- name: Install the upstream build prerequisites
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - git
+      - python3
+      - python3-venv
+      - python3-dev
+      - build-essential
+      - debootstrap
+      - debian-archive-keyring
+      - ubuntu-keyring
+      - rsync
+      - gnupg
+      - gpgv
+      - squashfs-tools
+      - qemu-utils
+      - qemu-system-x86
+      - libvirt-daemon-system
+      - libvirt-clients
+      - lxc
+      - jq
+      - xz-utils
+      - gzip
+      - kpartx
+      - parted
+      - dosfstools
+      - e2fsprogs
+    state: present
+    update_cache: true
+    install_recommends: false
+    policy_rc_d: 101
+- name: Create protected tool directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - "{{ golden_builder_prefix }}"
+    - "{{ golden_builder_prefix }}/bin"
+    - "{{ golden_builder_prefix }}/sources"
+    - /etc/zs-golden-images
+- name: Download the pinned Go compiler
+  ansible.builtin.get_url:
+    url: "https://go.dev/dl/go{{ golden_builder_go_version }}.linux-amd64.tar.gz"
+    dest: "{{ golden_builder_prefix }}/go{{ golden_builder_go_version }}.tar.gz"
+    checksum: "sha256:{{ golden_builder_go_sha256 }}"
+    owner: root
+    group: root
+    mode: '0644'
+- name: Install the pinned isolated compiler
+  ansible.builtin.unarchive:
+    src: "{{ golden_builder_prefix }}/go{{ golden_builder_go_version }}.tar.gz"
+    dest: "{{ golden_builder_prefix }}"
+    remote_src: true
+    creates: "{{ golden_builder_prefix }}/go/bin/go"
+- name: Verify compiler identity
+  ansible.builtin.command: "{{ golden_builder_prefix }}/go/bin/go version"
+  register: golden_go_identity
+  changed_when: false
+  failed_when: "('go' + golden_builder_go_version) not in golden_go_identity.stdout"
+- name: Checkout pinned native builder source
+  ansible.builtin.git:
+    repo: "{{ golden_builder_pins.distrobuilder.repository }}"
+    dest: "{{ golden_builder_prefix }}/sources/distrobuilder"
+    version: "{{ golden_builder_pins.distrobuilder.commit }}"
+    force: false
+  register: golden_distrobuilder_source
+- name: Build the pinned native executable
+  ansible.builtin.command:
+    argv:
+      - "{{ golden_builder_prefix }}/go/bin/go"
+      - build
+      - -trimpath
+      - -o
+      - "{{ golden_builder_prefix }}/bin/distrobuilder"
+      - ./distrobuilder
+    chdir: "{{ golden_builder_prefix }}/sources/distrobuilder"
+  environment:
+    GOTOOLCHAIN: local
+    GOFLAGS: -tags=containers_image_storage_stub,containers_image_docker_daemon_stub,containers_image_openpgp
+    GOBIN: "{{ golden_builder_prefix }}/bin"
+  changed_when: true
+- name: Install the reviewed Python dependency lock
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../requirements-builder.lock"
+    dest: "{{ golden_builder_prefix }}/requirements-builder.lock"
+    owner: root
+    group: root
+    mode: '0644'
+- name: Install exact hashed Python dependencies
+  ansible.builtin.pip:
+    requirements: "{{ golden_builder_prefix }}/requirements-builder.lock"
+    extra_args: "--require-hashes --only-binary=:all:"
+    virtualenv: "{{ golden_builder_prefix }}/venv"
+    virtualenv_command: python3 -m venv
+- name: Checkout pinned diskimage-builder source
+  ansible.builtin.git:
+    repo: "{{ golden_builder_pins.diskimage_builder.repository }}"
+    dest: "{{ golden_builder_prefix }}/sources/diskimage-builder"
+    version: "{{ golden_builder_pins.diskimage_builder.commit }}"
+    force: false
+- name: Install diskimage-builder without resolving or rebuilding dependencies
+  ansible.builtin.pip:
+    name: "{{ golden_builder_prefix }}/sources/diskimage-builder"
+    extra_args: --no-deps --no-build-isolation
+    virtualenv: "{{ golden_builder_prefix }}/venv"
+- name: Verify the installed dependency graph
+  ansible.builtin.command: "{{ golden_builder_prefix }}/venv/bin/python -m pip check"
+  changed_when: false
+- name: Reject unlocked or unexpected Python packages
+  ansible.builtin.command:
+    argv:
+      - "{{ golden_builder_prefix }}/venv/bin/python"
+      - -c
+      - |
+        import importlib.metadata, pathlib, re, sys
+        normalize = lambda name: re.sub(r'[-_.]+', '-', name).lower()
+        expected = {}
+        for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
+            match = re.match(r'^([A-Za-z0-9_.-]+)==([^ ]+)', line)
+            if match:
+                expected[normalize(match[1])] = match[2]
+        expected['diskimage-builder'] = sys.argv[2]
+        actual = {normalize(d.metadata['Name']): d.version for d in importlib.metadata.distributions()}
+        if actual != expected:
+            raise SystemExit('Installed Python packages differ from the reviewed dependency lock')
+      - "{{ golden_builder_prefix }}/requirements-builder.lock"
+      - "{{ golden_builder_pins.diskimage_builder.version }}"
+  changed_when: false
+- name: Read the reviewed collection artifact pins
+  ansible.builtin.set_fact:
+    golden_collection_pins: "{{ lookup('ansible.builtin.file', role_path + '/files/collections.json') | from_json }}"
+- name: Install the collection integrity checker
+  ansible.builtin.copy:
+    src: collection_integrity.py
+    dest: "{{ golden_builder_prefix }}/bin/collection_integrity.py"
+    owner: root
+    group: root
+    mode: '0755'
+- name: Download verified collection archives
+  ansible.builtin.get_url:
+    url: "{{ item.url }}"
+    dest: "{{ golden_builder_prefix }}/sources/{{ item.name }}-{{ item.version }}.tar.gz"
+    checksum: "sha256:{{ item.sha256 }}"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ golden_collection_pins }}"
+- name: Reinstall the reviewed collections from local verified archives
+  ansible.builtin.command:
+    argv:
+      - "{{ golden_builder_prefix }}/venv/bin/ansible-galaxy"
+      - collection
+      - install
+      - "{{ golden_builder_prefix }}/sources/{{ item.name }}-{{ item.version }}.tar.gz"
+      - --offline
+      - --no-deps
+      - --force
+      - -p
+      - "{{ golden_builder_prefix }}/collections"
+  environment:
+    PYTHONDONTWRITEBYTECODE: '1'
+  loop: "{{ golden_collection_pins }}"
+  changed_when: true
+- name: Measure the installed collection contents
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ golden_builder_prefix }}/bin/collection_integrity.py"
+      - "{{ golden_builder_prefix }}/collections"
+      - "{{ golden_collection_pins | to_json }}"
+  register: golden_collection_integrity
+  changed_when: false
+- name: Record installed Python dependencies
+  ansible.builtin.command: "{{ golden_builder_prefix }}/venv/bin/python -m pip freeze --all"
+  register: golden_python_freeze
+  changed_when: false
+- name: Preserve dependency inventory
+  ansible.builtin.copy:
+    dest: "{{ golden_builder_prefix }}/python-freeze.txt"
+    content: "{{ golden_python_freeze.stdout }}\n"
+    owner: root
+    group: root
+    mode: '0644'
+- name: Write the dedicated-builder identity
+  ansible.builtin.copy:
+    dest: /etc/zs-golden-images/builder.json
+    owner: root
+    group: root
+    mode: '0600'
+    content: "{{ {'purpose': 'isolated-image-builder', 'region': golden_builder_region, 'workspace': golden_builder_workspace, 'tools': golden_builder_pins} | to_nice_json }}\n"
+- name: Hash installed builder executables
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    checksum_algorithm: sha256
+  loop:
+    - "{{ golden_builder_prefix }}/venv/bin/disk-image-create"
+    - "{{ golden_builder_prefix }}/bin/distrobuilder"
+  register: golden_executables
+- name: Read installed Ansible identity
+  ansible.builtin.command: "{{ golden_builder_prefix }}/venv/bin/ansible --version"
+  register: golden_ansible_identity
+  changed_when: false
+- name: Hash recorded dependency inputs
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    checksum_algorithm: sha256
+  loop:
+    - "{{ golden_builder_prefix }}/requirements-builder.lock"
+    - "{{ golden_builder_prefix }}/python-freeze.txt"
+  register: golden_dependency_records
+- name: Record installed toolchain integrity
+  ansible.builtin.copy:
+    dest: /etc/zs-golden-images/toolchain.json
+    owner: root
+    group: root
+    mode: '0600'
+    content: "{{ golden_builder_pins | combine({'executables': {'diskimage_builder': golden_executables.results[0].stat.checksum, 'distrobuilder': golden_executables.results[1].stat.checksum}, 'python_lock_sha256': golden_dependency_records.results[0].stat.checksum, 'python_inventory_sha256': golden_dependency_records.results[1].stat.checksum, 'go_version': golden_go_identity.stdout, 'ansible_version': golden_ansible_identity.stdout_lines[0], 'collections': (golden_collection_integrity.stdout | from_json)}) | to_nice_json }}\n"

@@ -1,0 +1,109 @@
+---
+- name: Apply reviewed upstream CIS controls to disposable VM candidates
+  hosts: golden_candidates
+  become: true
+  gather_facts: true
+  serial: 1
+  pre_tasks:
+    - name: Require a scoped runtime remediation authorization
+      tags: always
+      ansible.builtin.assert:
+        that:
+          - lookup('ansible.builtin.env', 'GOLDEN_APPLY') == 'remediate'
+          - golden_runtime_approved | default(false) | bool
+          - golden_recovery_tested | default(false) | bool
+          - golden_recovery_reference | default('') | length > 0
+          - golden_profile in ['debian-13', 'ubuntu-26.04']
+          - ansible_facts.virtualization_type == 'kvm'
+          - ansible_facts.virtualization_role == 'guest'
+          - golden_cis_role_dir is match('^/')
+          - golden_cis_rule_settings is mapping
+          - golden_cis_rule_settings | length > 0
+          - golden_cis_exceptions is mapping
+          - ansible_run_tags == ['level1-server']
+          - ansible_skip_tags | length == 0
+          - not ansible_check_mode
+          - not (deb13cis_level_2 | default(false) | bool)
+          - not (ubtu26cis_level_2 | default(false) | bool)
+          - not (run_audit | default(false) | bool)
+          - not (setup_audit | default(false) | bool)
+    - name: Load reviewed candidate pins
+      tags: always
+      ansible.builtin.set_fact:
+        golden_cis_pin: "{{ (lookup('ansible.builtin.file', playbook_dir + '/../../audit/pins.json') | from_json).profiles[golden_profile].remediation_candidate }}"
+        golden_cis_prefix: "{{ 'deb13cis' if golden_profile == 'debian-13' else 'ubtu26cis' }}"
+    - name: Validate private control overrides
+      tags: always
+      ansible.builtin.assert:
+        that:
+          - item.key is match('^' + golden_cis_prefix + '_rule_[0-9_]+$')
+          - item.value is boolean
+          - item.value or (golden_cis_exceptions[item.key] | default('') | length > 0)
+      loop: "{{ golden_cis_rule_settings | dict2items }}"
+    - name: Require explicit access and firewall decisions
+      tags: always
+      ansible.builtin.assert:
+        that:
+          - (golden_cis_prefix + '_rule_5_2_4') in golden_cis_rule_settings
+          - golden_cis_firewall_reviewed | default(false) | bool
+          - golden_cis_benchmark_version == golden_cis_pin.benchmark_version
+    - name: Verify pinned remediation source on the controller
+      tags: always
+      ansible.builtin.command:
+        argv: [git, -C, "{{ golden_cis_role_dir }}", rev-parse, HEAD]
+      delegate_to: localhost
+      become: false
+      register: golden_cis_checkout
+      changed_when: false
+      failed_when: golden_cis_checkout.rc != 0 or golden_cis_checkout.stdout != golden_cis_pin.commit
+    - name: Verify remediation source is unmodified
+      tags: always
+      ansible.builtin.command:
+        argv: [git, -C, "{{ golden_cis_role_dir }}", status, --porcelain, --untracked-files=all, --ignored]
+      delegate_to: localhost
+      become: false
+      register: golden_cis_status
+      changed_when: false
+      failed_when: golden_cis_status.rc != 0 or golden_cis_status.stdout | length > 0
+    - name: Read candidate provenance before any remediation
+      tags: always
+      ansible.builtin.slurp:
+        src: /etc/golden-image.json
+      register: golden_candidate_provenance
+    - name: Require matching VM provenance with external acceptance
+      tags: always
+      ansible.builtin.assert:
+        that:
+          - (golden_candidate_provenance.content | b64decode | from_json).profile == golden_profile
+          - (golden_candidate_provenance.content | b64decode | from_json).target == 'cloudstack-kvm'
+          - (golden_candidate_provenance.content | b64decode | from_json).acceptance_source == 'signed-release-metadata'
+          - (golden_profile == 'debian-13' and ansible_facts.distribution == 'Debian' and ansible_facts.distribution_major_version == '13') or (golden_profile == 'ubuntu-26.04' and ansible_facts.distribution == 'Ubuntu' and ansible_facts.distribution_version == '26.04')
+    - name: Apply reviewed per-control selections
+      tags: always
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ golden_cis_rule_settings | dict2items }}"
+  tasks:
+    - name: Execute the pinned runtime role with Level 2 and embedded audits disabled
+      tags: always
+      ansible.builtin.include_role:
+        name: "{{ golden_cis_role_dir }}"
+      vars:
+        deb13cis_level_1: true
+        deb13cis_level_2: false
+        ubtu26cis_level_1: true
+        ubtu26cis_level_2: false
+        run_audit: false
+        setup_audit: false
+        audit_only: false
+        skip_reboot: true
+        deb13cis_set_boot_pass: false
+        ubtu26cis_set_boot_pass: false
+    - name: Record remediation without accepting the image
+      tags: always
+      ansible.builtin.copy:
+        dest: /etc/golden-image-remediation.json
+        owner: root
+        group: root
+        mode: '0644'
+        content: "{{ {'commit': golden_cis_pin.commit, 'benchmark_version': golden_cis_pin.benchmark_version, 'rules': golden_cis_rule_settings, 'exceptions': golden_cis_exceptions, 'stage': 'runtime-remediation', 'required_acceptance_steps': ['reboot', 'audit', 'recapture'], 'acceptance_source': 'signed-release-metadata'} | to_nice_json }}\n"

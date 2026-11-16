@@ -1,0 +1,202 @@
+---
+- name: Import one verified upstream disk as a never-booted seed
+  hosts: "{{ node }}"
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Require explicit isolated allocation and immutable source
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length == 1
+          - not ansible_check_mode
+          - lookup('ansible.builtin.env', 'GOLDEN_APPLY') == 'seed'
+          - seed_vm_id | int >= 100
+          - seed_vm_id | int <= 999999999
+          - seed_vm_id | int != template_vm_id | int
+          - source_image_sha256 is match('^[0-9a-f]{64}$')
+          - source_image_url is match('^https://')
+          - seed_cache_dir is match('^/([A-Za-z0-9_-][A-Za-z0-9._-]*/){2,}[A-Za-z0-9_-][A-Za-z0-9._-]*$')
+          - storage_pool is match('^[A-Za-z0-9][A-Za-z0-9_-]*$')
+          - os_profile in ['debian-13', 'ubuntu-26.04']
+        fail_msg: Import requires one authorized node, reserved distinct IDs, and a verified source checksum. Check mode cannot validate an import.
+
+    - name: Read cluster guest allocation before creating anything
+      ansible.builtin.command: pvesh get /cluster/resources --type vm --output-format json
+      register: seed_cluster_guests
+      changed_when: false
+
+    - name: Refuse occupied seed and final template IDs
+      ansible.builtin.assert:
+        that:
+          - seed_vm_id | int not in (seed_cluster_guests.stdout | from_json | map(attribute='vmid') | map('int') | list)
+          - template_vm_id | int not in (seed_cluster_guests.stdout | from_json | map(attribute='vmid') | map('int') | list)
+        fail_msg: A reserved ID is occupied. Nothing will be overwritten or deleted.
+
+    - name: Read target storage
+      ansible.builtin.command:
+        argv: [pvesm, status, --storage, "{{ storage_pool }}"]
+      changed_when: false
+
+    - name: Inspect the existing cache parent without following links
+      ansible.builtin.stat:
+        path: "{{ seed_cache_dir }}"
+        follow: false
+      register: seed_cache_parent
+
+    - name: Require a root-owned parent protected from other writers
+      ansible.builtin.assert:
+        that:
+          - seed_cache_parent.stat.exists
+          - seed_cache_parent.stat.isdir | default(false)
+          - not (seed_cache_parent.stat.islnk | default(false))
+          - seed_cache_parent.stat.uid == 0
+          - seed_cache_parent.stat.mode is match('^0[0-7][0145][0145]$')
+        fail_msg: Cache parent must already exist, be root-owned, and prohibit group/other writes. This play never changes its permissions.
+
+    - name: Resolve the existing cache parent
+      ansible.builtin.command:
+        argv: [realpath, -e, "{{ seed_cache_dir }}"]
+      register: seed_cache_realpath
+      changed_when: false
+
+    - name: Reject symlinks in every parent path component
+      ansible.builtin.assert:
+        that:
+          - seed_cache_realpath.stdout == seed_cache_dir
+
+    - name: Inspect the dedicated project cache without following links
+      ansible.builtin.stat:
+        path: "{{ seed_cache_dir }}/zs-golden-images"
+        follow: false
+      register: seed_project_cache
+
+    - name: Reject an unsafe existing project cache
+      ansible.builtin.assert:
+        that:
+          - not seed_project_cache.stat.exists or (seed_project_cache.stat.isdir | default(false) and not (seed_project_cache.stat.islnk | default(false)) and seed_project_cache.stat.uid == 0 and seed_project_cache.stat.mode == '0700')
+
+    - name: Inspect existing cache ownership marker
+      ansible.builtin.stat:
+        path: "{{ seed_cache_dir }}/zs-golden-images/.owner"
+        follow: false
+      register: seed_cache_marker
+      when: seed_project_cache.stat.exists
+
+    - name: Require an existing project ownership marker
+      ansible.builtin.assert:
+        that:
+          - seed_cache_marker.stat.exists
+          - seed_cache_marker.stat.isreg | default(false)
+          - not (seed_cache_marker.stat.islnk | default(false))
+          - seed_cache_marker.stat.uid == 0
+      when: seed_project_cache.stat.exists
+
+    - name: Read existing project ownership marker
+      ansible.builtin.slurp:
+        src: "{{ seed_cache_dir }}/zs-golden-images/.owner"
+      register: seed_cache_owner
+      when: seed_project_cache.stat.exists
+
+    - name: Verify existing cache belongs to this project
+      ansible.builtin.assert:
+        that:
+          - seed_cache_owner.content | b64decode == 'zs-golden-images cache v1\n'
+      when: seed_project_cache.stat.exists
+
+    - name: Create only the dedicated project cache
+      ansible.builtin.file:
+        path: "{{ seed_cache_dir }}/zs-golden-images"
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+      when: not seed_project_cache.stat.exists
+
+    - name: Mark the new directory as owned by this project
+      ansible.builtin.copy:
+        dest: "{{ seed_cache_dir }}/zs-golden-images/.owner"
+        content: "zs-golden-images cache v1\n"
+        owner: root
+        group: root
+        mode: '0600'
+      when: not seed_project_cache.stat.exists
+
+    - name: Download and verify upstream disk
+      ansible.builtin.get_url:
+        url: "{{ source_image_url }}"
+        dest: "{{ seed_cache_dir }}/zs-golden-images/{{ source_image_sha256 }}.img"
+        checksum: "sha256:{{ source_image_sha256 }}"
+        validate_certs: true
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Create stopped seed with provenance and no NIC or credentials
+      ansible.builtin.command:
+        argv:
+          - qm
+          - create
+          - "{{ seed_vm_id }}"
+          - --name
+          - "zs-seed-{{ os_profile }}-{{ source_image_sha256[:12] }}"
+          - --description
+          - "zs-golden-seed profile={{ os_profile }} sha256={{ source_image_sha256 }}"
+          - --ostype
+          - l26
+          - --cores
+          - '2'
+          - --memory
+          - '2048'
+          - --cpu
+          - "{{ cpu_type }}"
+          - --scsihw
+          - virtio-scsi-pci
+          - --agent
+          - '1'
+          - --onboot
+          - '0'
+      changed_when: true
+
+    - name: Import verified source disk
+      ansible.builtin.command:
+        argv: [qm, disk, import, "{{ seed_vm_id }}", "{{ seed_cache_dir }}/zs-golden-images/{{ source_image_sha256 }}.img", "{{ storage_pool }}", --format, raw]
+      changed_when: true
+
+    - name: Read the imported disk volume
+      ansible.builtin.command:
+        argv: [qm, config, "{{ seed_vm_id }}"]
+      register: seed_config
+      changed_when: false
+
+    - name: Require exactly one imported disk
+      ansible.builtin.assert:
+        that:
+          - "seed_config.stdout_lines | select('match', '^unused0: ') | list | length == 1"
+
+    - name: Attach imported disk and cloud-init drive
+      ansible.builtin.command:
+        argv:
+          - qm
+          - set
+          - "{{ seed_vm_id }}"
+          - --scsi0
+          - "{{ (seed_config.stdout_lines | select('match', '^unused0: ') | first).split(': ', 1)[1] }}"
+          - --ide2
+          - "{{ storage_pool }}:cloudinit"
+          - --boot
+          - order=scsi0
+          - --serial0
+          - socket
+          - --vga
+          - serial0
+      changed_when: true
+
+    - name: Grow the seed root disk to the pilot limit
+      ansible.builtin.command:
+        argv: [qm, disk, resize, "{{ seed_vm_id }}", scsi0, 16G]
+      changed_when: true
+
+    - name: Convert the stopped seed without booting it
+      ansible.builtin.command:
+        argv: [qm, template, "{{ seed_vm_id }}"]
+      changed_when: true

@@ -1,0 +1,165 @@
+---
+- name: Record final installed package versions
+  ansible.builtin.command: dpkg-query -W
+  register: golden_packages
+  changed_when: false
+- name: Preserve package evidence in the image
+  ansible.builtin.copy:
+    dest: /etc/golden-image-packages.txt
+    owner: root
+    group: root
+    mode: '0644'
+    content: "{{ golden_packages.stdout }}\n"
+- name: Clean package cache without modifying package state
+  ansible.builtin.command: apt-get clean
+  changed_when: true
+- name: Clear cloud-init capture state without waiting for a boot
+  ansible.builtin.command: cloud-init clean --logs --seed --machine-id --configs network
+  changed_when: true
+  when: golden_target == 'cloudstack-kvm'
+- name: Reset machine identity for first boot
+  ansible.builtin.copy:
+    dest: /etc/machine-id
+    content: ''
+    owner: root
+    group: root
+    mode: '0444'
+- name: Remove inherited D-Bus identity
+  ansible.builtin.file:
+    path: /var/lib/dbus/machine-id
+    state: absent
+- name: Link D-Bus identity to first-boot identity
+  ansible.builtin.file:
+    src: /etc/machine-id
+    dest: /var/lib/dbus/machine-id
+    state: link
+    force: true
+- name: Install first-boot host-key generation for LXC
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/zs-ssh-hostkeys.service
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      [Unit]
+      Description=Generate unique SSH host keys
+      Before=ssh.service
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/bin/ssh-keygen -A
+      RemainAfterExit=yes
+      [Install]
+      WantedBy=multi-user.target
+  when: golden_target == 'proxmox-lxc'
+- name: Enable LXC host-key generation for the first boot
+  ansible.builtin.command: systemctl enable --no-reload zs-ssh-hostkeys.service
+  register: golden_hostkeys_enable
+  changed_when: "'Created symlink' in golden_hostkeys_enable.stderr"
+  when: golden_target == 'proxmox-lxc'
+- name: Remove captured identities and private runtime data
+  ansible.builtin.shell: |
+    set -eu
+    for path in /var/log /tmp /var/tmp; do
+      test ! -L "$path"
+      if mountpoint -q "$path"; then exit 1; fi
+    done
+    rm -f /etc/ssh/ssh_host_* /var/lib/systemd/random-seed
+    rm -f /root/.ssh/authorized_keys /root/.bash_history /root/.zsh_history
+    for home in /home/*; do
+      test ! -d "$home" || rm -f "$home/.ssh/authorized_keys" "$home/.bash_history" "$home/.zsh_history"
+    done
+    for path in /var/log /tmp /var/tmp; do
+      test ! -d "$path" || find "$path" -xdev -mindepth 1 -delete
+    done
+    test ! -d /var/lib/dhcp || find /var/lib/dhcp -xdev -type f -name '*.leases' -delete
+    test ! -d /var/lib/NetworkManager || find /var/lib/NetworkManager -xdev -type f -name '*.lease' -delete
+    test ! -s /var/ossec/etc/client.keys
+  args:
+    executable: /bin/sh
+  changed_when: true
+- name: Reset generic hostname
+  ansible.builtin.copy:
+    dest: /etc/hostname
+    owner: root
+    group: root
+    mode: '0644'
+    content: "localhost\n"
+- name: Find build-time APT source definitions
+  ansible.builtin.find:
+    paths: /etc/apt/sources.list.d
+    patterns: ['*.list', '*.sources']
+    file_type: file
+  register: golden_apt_sources
+- name: Remove build-only APT source definitions
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ golden_apt_sources.files }}"
+- name: Remove legacy APT source definition
+  ansible.builtin.file:
+    path: /etc/apt/sources.list
+    state: absent
+- name: Configure signed public update repositories
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/zs-runtime.sources
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      Types: deb
+      URIs: {{ 'https://deb.debian.org/debian' if golden_profile == 'debian-13' else 'https://archive.ubuntu.com/ubuntu' }}
+      Suites: {{ 'trixie trixie-updates' if golden_profile == 'debian-13' else 'resolute resolute-updates' }}
+      Components: {{ 'main' if golden_profile == 'debian-13' else 'main universe' }}
+      Signed-By: /usr/share/keyrings/{{ 'debian-archive-keyring.gpg' if golden_profile == 'debian-13' else 'ubuntu-archive-keyring.gpg' }}
+
+      Types: deb
+      URIs: {{ 'https://deb.debian.org/debian-security' if golden_profile == 'debian-13' else 'https://security.ubuntu.com/ubuntu' }}
+      Suites: {{ 'trixie-security' if golden_profile == 'debian-13' else 'resolute-security' }}
+      Components: {{ 'main' if golden_profile == 'debian-13' else 'main universe' }}
+      Signed-By: /usr/share/keyrings/{{ 'debian-archive-keyring.gpg' if golden_profile == 'debian-13' else 'ubuntu-archive-keyring.gpg' }}
+- name: Remove private build metadata and transient package lists
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/dib-manifests
+    - /etc/apt/apt.conf.d/99-zs-snapshot-validity
+    - /var/lib/apt/lists
+- name: Recreate package list directory
+  ansible.builtin.file:
+    path: /var/lib/apt/lists
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+- name: Remove inherited resolver configuration after package operations
+  ansible.builtin.shell: |
+    set -eu
+    test ! -L /etc
+    if mountpoint -q /etc; then exit 1; fi
+    set -- /etc/resolv.conf /etc/resolv.conf.ORIG
+    if [ "$GOLDEN_TARGET" = cloudstack-kvm ]; then
+      for parent in /run /run/systemd /run/systemd/resolve; do
+        test ! -L "$parent"
+        if mountpoint -q "$parent"; then exit 1; fi
+      done
+      # Both distro postinst scripts preserve build DNS in these two files.
+      set -- "$@" /etc/.resolv.conf.systemd-resolved.bak /run/systemd/resolve/stub-resolv.conf
+    fi
+    for path do
+      if mountpoint -q "$path"; then exit 1; fi
+    done
+    for path do
+      rm -f "$path"
+    done
+    # DIB honors a final resolver symlink and removes its saved .ORIG file.
+    if [ "$GOLDEN_TARGET" = cloudstack-kvm ]; then
+      ln -s ../run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+    else
+      install -m 0644 /dev/null /etc/resolv.conf
+    fi
+  args:
+    executable: /bin/sh
+  environment:
+    GOLDEN_TARGET: "{{ golden_target }}"
+  changed_when: true

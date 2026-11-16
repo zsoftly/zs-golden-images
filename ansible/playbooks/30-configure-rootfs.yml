@@ -1,0 +1,28 @@
+---
+- name: Configure an offline image root filesystem
+  hosts: image
+  gather_facts: false
+  pre_tasks:
+    - name: Require the guarded chroot adapter
+      ansible.builtin.assert:
+        that:
+          - ansible_connection == 'community.general.chroot'
+          - golden_phase in ['configure', 'harden', 'cleanup']
+          - golden_profile in ['debian-13', 'ubuntu-26.04']
+          - golden_target in ['cloudstack-kvm', 'proxmox-lxc']
+          - golden_source_commit is match('^[0-9a-f]{40}$')
+          - golden_source_image_sha256 is match('^[0-9a-f]{64}$')
+          - golden_source_kind == 'apt-snapshot'
+          - lookup('ansible.builtin.env', 'GOLDEN_APPLY') == 'build'
+    - name: Read the root filesystem OS identity
+      ansible.builtin.command: cat /etc/os-release
+      register: golden_os_release
+      changed_when: false
+    - name: Require the matching OS release
+      ansible.builtin.assert:
+        that:
+          - (golden_profile == 'debian-13' and golden_os_release.stdout is search('(?m)^ID=debian$') and golden_os_release.stdout is search('(?m)^VERSION_ID="13"$')) or (golden_profile == 'ubuntu-26.04' and golden_os_release.stdout is search('(?m)^ID=ubuntu$') and golden_os_release.stdout is search('(?m)^VERSION_ID="26.04"$'))
+  tasks:
+    - name: Apply the requested image phase
+      ansible.builtin.include_role:
+        name: "{{ {'configure': 'image_configure', 'harden': 'image_harden', 'cleanup': 'image_cleanup'}[golden_phase] }}"

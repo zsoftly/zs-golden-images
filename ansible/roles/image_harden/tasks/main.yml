@@ -1,0 +1,170 @@
+---
+- name: Install the key-only SSH baseline
+  ansible.builtin.copy:
+    content: "{{ lookup('ansible.builtin.file', role_path + '/files/ssh.conf') | replace('PermitRootLogin no', 'PermitRootLogin prohibit-password' if golden_target == 'proxmox-lxc' else 'PermitRootLogin no') }}\n"
+    dest: /etc/ssh/sshd_config.d/00-golden-images.conf
+    owner: root
+    group: root
+    mode: '0600'
+- name: Read existing SSH daemon configuration
+  ansible.builtin.slurp:
+    src: /etc/ssh/sshd_config
+  register: golden_sshd_original
+- name: Place drop-in policies before every existing SSH setting
+  ansible.builtin.copy:
+    dest: /etc/ssh/sshd_config
+    owner: root
+    group: root
+    mode: '0600'
+    content: "{{ 'Include /etc/ssh/sshd_config.d/*.conf\n' + (golden_sshd_original.content | b64decode | regex_replace('(?m)^Include /etc/ssh/sshd_config[.]d/[*][.]conf\n?', '')) }}"
+- name: Configure password quality for future local passwords
+  ansible.builtin.copy:
+    dest: /etc/security/pwquality.conf
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      minlen = 14
+      minclass = 4
+      difok = 2
+      maxrepeat = 3
+      enforce_for_root
+- name: Configure default local account aging
+  ansible.builtin.lineinfile:
+    path: /etc/login.defs
+    regexp: "^{{ item.key }}\\s+"
+    line: "{{ item.key }} {{ item.value }}"
+  loop:
+    - {key: PASS_MAX_DAYS, value: '365'}
+    - {key: PASS_MIN_DAYS, value: '1'}
+    - {key: PASS_WARN_AGE, value: '7'}
+    - {key: UMASK, value: '027'}
+- name: Lock the root password in captured images
+  ansible.builtin.user:
+    name: root
+    password_lock: true
+- name: Restrict default permissions for interactive shells
+  ansible.builtin.copy:
+    dest: /etc/profile.d/90-zs-umask.sh
+    owner: root
+    group: root
+    mode: '0644'
+    content: "umask 027\n"
+- name: Record a VM kernel baseline for boot without changing builder kernel
+  ansible.builtin.copy:
+    src: sysctl-vm.conf
+    dest: /etc/sysctl.d/60-zs-golden-images.conf
+    owner: root
+    group: root
+    mode: '0644'
+  when: golden_target == 'cloudstack-kvm'
+- name: Remove VM kernel settings from container images
+  ansible.builtin.file:
+    path: /etc/sysctl.d/60-zs-golden-images.conf
+    state: absent
+  when: golden_target == 'proxmox-lxc'
+- name: Set core dump policy without running systemd
+  ansible.builtin.copy:
+    dest: /etc/security/limits.d/60-zs-golden-images.conf
+    owner: root
+    group: root
+    mode: '0644'
+    content: "* hard core 0\n"
+- name: Protect local account databases
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    owner: root
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: /etc/passwd, group: root, mode: '0644'}
+    - {path: /etc/group, group: root, mode: '0644'}
+    - {path: /etc/shadow, group: shadow, mode: '0640'}
+    - {path: /etc/gshadow, group: shadow, mode: '0640'}
+- name: Record explicit incomplete hardening coverage
+  ansible.builtin.copy:
+    dest: /etc/golden-image-hardening.json
+    owner: root
+    group: root
+    mode: '0644'
+    content: "{{ {'baseline': 'offline-l1-subset', 'cis_complete': false, 'acceptance_source': 'signed-release-metadata', 'target': golden_target, 'configured': ['ssh-key-only', 'password-quality', 'password-aging-defaults', 'root-password-lock', 'default-umask', 'account-file-permissions', 'core-dump-limit', 'password-history', 'sudo-session-logging', 'persistent-journal'] + (['vm-sysctl-baseline'] if golden_target == 'cloudstack-kvm' else []), 'requires_runtime_evidence': ['effective-ssh-policy', 'service-health', 'pam-enforcement', 'complete-benchmark-audit'], 'host_owned': (['kernel-modules', 'sysctl', 'time-synchronization', 'bootloader', 'disk-partitioning'] if golden_target == 'proxmox-lxc' else []), 'provisioning_exceptions': (['root-key-only-until-instance-admin-provisioned'] if golden_target == 'proxmox-lxc' else []), 'unimplemented': ['full-benchmark-control-mapping', 'filesystem-layout', 'firewall-policy', 'auditd-rules', 'bootloader-policy', 'account-lockout']} | to_nice_json }}\n"
+- name: Register password-history PAM policy
+  ansible.builtin.copy:
+    dest: /usr/share/pam-configs/zs-pwhistory
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      Name: Golden image password history
+      Default: yes
+      Priority: 1000
+      Password-Type: Primary
+      Password:
+              requisite pam_pwhistory.so remember=24 enforce_for_root use_authtok
+  register: golden_history_profile
+- name: Enable password-quality and history profiles
+  ansible.builtin.shell: |
+    set -eu
+    quality='^password[[:space:]]+requisite[[:space:]]+pam_pwquality.so'
+    history='^password[[:space:]]+requisite[[:space:]]+pam_pwhistory.so[[:space:]]+remember=24[[:space:]]+enforce_for_root[[:space:]]+use_authtok'
+    if [ "$GOLDEN_PAM_REFRESH" != true ] && grep -Eq "$quality" /etc/pam.d/common-password && grep -Eq "$history" /etc/pam.d/common-password; then
+      exit 0
+    fi
+    before=$(sha256sum /etc/pam.d/common-password)
+    pam-auth-update --package --enable pwquality zs-pwhistory
+    grep -Eq "$quality" /etc/pam.d/common-password
+    grep -Eq "$history" /etc/pam.d/common-password
+    after=$(sha256sum /etc/pam.d/common-password)
+    test "$before" = "$after" || printf 'changed\n'
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+    GOLDEN_PAM_REFRESH: "{{ golden_history_profile.changed | ternary('true', 'false') }}"
+  register: golden_pam_update
+  changed_when: "'changed' in golden_pam_update.stdout_lines"
+- name: Configure audited sudo sessions while preserving provisioning access
+  ansible.builtin.copy:
+    dest: /etc/sudoers.d/60-zs-golden-images
+    owner: root
+    group: root
+    mode: '0440'
+    content: |
+      Defaults use_pty
+      Defaults logfile="/var/log/sudo.log"
+      Defaults timestamp_timeout=5
+    validate: /usr/sbin/visudo -cf %s
+- name: Create persistent journal policy directory
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+- name: Configure persistent compressed logs
+  ansible.builtin.copy:
+    dest: /etc/systemd/journald.conf.d/60-zs-golden-images.conf
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      [Journal]
+      Storage=persistent
+      Compress=yes
+      ForwardToSyslog=yes
+- name: Disable unneeded filesystem modules in VM guests only
+  ansible.builtin.copy:
+    dest: /etc/modprobe.d/60-zs-golden-images.conf
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      install cramfs /bin/false
+      blacklist cramfs
+      install freevxfs /bin/false
+      blacklist freevxfs
+      install hfs /bin/false
+      blacklist hfs
+      install hfsplus /bin/false
+      blacklist hfsplus
+      install jffs2 /bin/false
+      blacklist jffs2
+  when: golden_target == 'cloudstack-kvm'

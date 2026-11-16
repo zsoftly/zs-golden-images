@@ -1,0 +1,17 @@
+---
+- name: Load offline role definitions for syntax validation only
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Never execute this syntax fixture
+      ansible.builtin.fail:
+        msg: This playbook exists only for --syntax-check.
+    - name: Parse shared root filesystem configuration
+      ansible.builtin.import_role:
+        name: image_configure
+    - name: Parse shared root filesystem hardening
+      ansible.builtin.import_role:
+        name: image_harden
+    - name: Parse shared root filesystem cleanup
+      ansible.builtin.import_role:
+        name: image_cleanup

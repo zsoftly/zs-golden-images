@@ -1,0 +1,68 @@
+---
+- name: Apply available package updates
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+    upgrade: safe
+    lock_timeout: 300
+
+- name: Install the minimal server packages
+  ansible.builtin.apt:
+    name: "{{ base_packages }}"
+    state: present
+    install_recommends: false
+    lock_timeout: 300
+
+- name: Enable guest agent and time synchronization
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop:
+    - qemu-guest-agent
+    - chrony
+    - ssh
+
+- name: Configure key-only SSH access
+  ansible.builtin.copy:
+    dest: /etc/ssh/sshd_config.d/00-golden-images.conf
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PermitRootLogin no
+
+- name: Validate SSH configuration before capture
+  ansible.builtin.command: /usr/sbin/sshd -t
+  changed_when: false
+
+- name: Preserve provenance without site configuration
+  ansible.builtin.copy:
+    dest: /etc/golden-image.json
+    owner: root
+    group: root
+    mode: '0644'
+    content: "{{ {'profile': golden_profile, 'source_commit': golden_source_commit, 'source_image_url': golden_source_image_url, 'source_image_sha256': golden_source_image_sha256, 'status': 'experimental-unaccepted'} | to_nice_json }}\n"
+
+- name: Record package versions
+  ansible.builtin.command: dpkg-query -W
+  register: golden_package_versions
+  changed_when: false
+
+- name: Save package versions inside image
+  ansible.builtin.copy:
+    dest: /etc/golden-image-packages.txt
+    owner: root
+    group: root
+    mode: '0644'
+    content: "{{ golden_package_versions.stdout }}\n"
+
+- name: Authorize one cleanup inside this build guest
+  ansible.builtin.copy:
+    dest: /run/zs-golden-image-build
+    owner: root
+    group: root
+    mode: '0600'
+    content: "{{ golden_source_commit }}\n"
