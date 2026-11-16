@@ -35,7 +35,8 @@ class ReleaseTests(unittest.TestCase):
                      "inputs": {"snapshot": "fixture"}}
         self.write(self.candidate, self.data)
         self.evidence = self.root / "evidence.json"
-        self.write(self.evidence, {"fixture": "test-only"})
+        self.write(self.evidence, {"fixture": "test-only", "coverage": "complete",
+                                   "raw_provenance": "verified", "promotion_allowed": True})
         evidence_hash = release.digest(self.evidence)
         today = datetime.datetime.now(datetime.timezone.utc).date()
         self.accepted = {
@@ -57,15 +58,33 @@ class ReleaseTests(unittest.TestCase):
     def write(self, path, value):
         path.write_text(json.dumps(value))
 
-    def archive(self, extra=None):
+    def archive(self, extra=None, omit=()):
         contents = {"etc/os-release": b"ID=debian\nVERSION_ID=13\n", "etc/machine-id": b"",
-                    "etc/golden-image.json": b"{}"}
+                    "etc/golden-image.json": b"{}", "etc/resolv.conf": b""}
         contents.update(extra or {})
+        for name in omit:
+            del contents[name]
         with tarfile.open(self.artifact, "w:xz") as archive:
             for name, value in contents.items():
                 member = tarfile.TarInfo(name)
-                member.size = len(value)
-                archive.addfile(member, io.BytesIO(value))
+                if isinstance(value, tarfile.TarInfo):
+                    archive.addfile(value)
+                else:
+                    member.size = len(value)
+                    archive.addfile(member, io.BytesIO(value))
+
+    def replace_evidence(self, value, name="evidence.json", text=False):
+        self.evidence = self.root / name
+        if text:
+            self.evidence.write_text(value)
+        else:
+            self.write(self.evidence, value)
+        evidence_hash = release.digest(self.evidence)
+        self.accepted["evidence"] = [{"path": name, "sha256": evidence_hash}]
+        for check in self.accepted["checks"].values():
+            check["evidence"] = [evidence_hash]
+        self.accepted["vulnerability_scan"]["report_sha256"] = evidence_hash
+        self.write(self.approval, self.accepted)
 
     def check(self):
         with patch.object(release, "verify_signature"):
@@ -111,6 +130,52 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Incomplete"):
             self.check()
 
+    def test_renamed_incomplete_json_is_rejected_for_any_check(self):
+        report = self.root / "boot-evidence.txt"
+        self.write(report, {"coverage": "incomplete", "promotion_allowed": False})
+        report_hash = release.digest(report)
+        self.accepted["evidence"].append({"path": report.name, "sha256": report_hash})
+        self.accepted["checks"]["boot"]["evidence"] = [report_hash]
+        self.write(self.approval, self.accepted)
+        with self.assertRaisesRegex(ValueError, "Incomplete"):
+            self.check()
+
+    def test_text_audit_cannot_satisfy_cis_coverage(self):
+        self.replace_evidence("Reviewer attests to complete CIS coverage.\n", "report.txt", text=True)
+        with self.assertRaisesRegex(ValueError, "CIS coverage"):
+            self.check()
+
+    def test_blocked_text_audit_is_rejected_for_any_check(self):
+        report = self.root / "boot-evidence.txt"
+        report.write_text("Requested audit: fixture\nCoverage: incomplete. Promotion: BLOCKED.\n")
+        report_hash = release.digest(report)
+        self.accepted["evidence"].append({"path": report.name, "sha256": report_hash})
+        self.accepted["checks"]["boot"]["evidence"] = [report_hash]
+        self.write(self.approval, self.accepted)
+        with self.assertRaisesRegex(ValueError, "Incomplete"):
+            self.check()
+
+    def test_cis_coverage_requires_explicit_complete_verified_acceptance(self):
+        complete = {"coverage": "complete", "raw_provenance": "verified", "promotion_allowed": True}
+        for field in complete:
+            with self.subTest(missing=field):
+                report = complete.copy()
+                del report[field]
+                self.replace_evidence(report)
+                with self.assertRaisesRegex(ValueError, "CIS coverage"):
+                    self.check()
+
+    def test_complete_cis_json_is_accepted_without_json_extension(self):
+        self.replace_evidence({"coverage": "complete", "raw_provenance": "verified",
+                               "promotion_allowed": True}, "reviewed-coverage.txt")
+        self.assertEqual(self.check()[0]["target"], "proxmox-lxc")
+
+    def test_duplicate_keys_in_renamed_evidence_are_rejected(self):
+        self.replace_evidence('{"coverage":"incomplete","coverage":"complete"}',
+                              "report.txt", text=True)
+        with self.assertRaisesRegex(ValueError, "Duplicate"):
+            self.check()
+
     def test_stale_scanner_database(self):
         self.accepted["vulnerability_scan"]["database_updated"] = "2020-01-01"
         self.write(self.approval, self.accepted)
@@ -137,6 +202,28 @@ class ReleaseTests(unittest.TestCase):
     def test_identity_left_in_archive(self):
         self.archive({"etc/machine-id": b"old-identity"})
         with self.assertRaisesRegex(ValueError, "machine ID"):
+            release.inspect_artifact(self.artifact, "proxmox-lxc")
+
+    def test_inherited_resolver_content_is_rejected(self):
+        for name in ("etc/resolv.conf", "etc/resolv.conf.ORIG"):
+            with self.subTest(path=name):
+                self.archive({name: b"nameserver 192.0.2.53\nsearch builder.example.invalid\n"})
+                with self.assertRaisesRegex(ValueError, "resolver"):
+                    release.inspect_artifact(self.artifact, "proxmox-lxc")
+
+    def test_resolver_must_be_a_regular_file(self):
+        for kind in (tarfile.SYMTYPE, tarfile.LNKTYPE):
+            with self.subTest(type=kind):
+                resolver = tarfile.TarInfo("etc/resolv.conf")
+                resolver.type = kind
+                resolver.linkname = "../run/systemd/resolve/stub-resolv.conf"
+                self.archive({"etc/resolv.conf": resolver})
+                with self.assertRaisesRegex(ValueError, "resolver"):
+                    release.inspect_artifact(self.artifact, "proxmox-lxc")
+
+    def test_missing_neutral_resolver_is_rejected(self):
+        self.archive(omit=("etc/resolv.conf",))
+        with self.assertRaisesRegex(ValueError, "required"):
             release.inspect_artifact(self.artifact, "proxmox-lxc")
 
     def test_duplicate_json_keys(self):

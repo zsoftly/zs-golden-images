@@ -86,7 +86,8 @@ class ImagePolicyTests(unittest.TestCase):
             golden_source_kind='apt-snapshot', golden_source_commit='a'*40,
             golden_source_image_sha256='b'*64, golden_source_image_url='https://private.invalid/snapshot'))
         self.assertEqual(result['source_manifest_sha256'], 'b'*64)
-        self.assertEqual(result['status'], 'experimental-unaccepted')
+        self.assertEqual(result['acceptance_source'], 'signed-release-metadata')
+        self.assertNotIn('status', result)
         self.assertNotIn('source_image_url', result)
         self.assertNotIn('source_image_sha256', result)
 
@@ -96,7 +97,8 @@ class ImagePolicyTests(unittest.TestCase):
         env.filters['to_nice_json'] = json.dumps
         report = json.loads(env.from_string(data['content']).render(golden_target='proxmox-lxc'))
         self.assertFalse(report['cis_complete'])
-        self.assertFalse(report['promotion_allowed'])
+        self.assertEqual(report['acceptance_source'], 'signed-release-metadata')
+        self.assertNotIn('promotion_allowed', report)
         self.assertIn('kernel-modules', report['host_owned'])
         self.assertNotIn('vm-sysctl-baseline', report['configured'])
         self.assertIn('root-key-only-until-instance-admin-provisioned', report['provisioning_exceptions'])
@@ -110,6 +112,220 @@ class ImagePolicyTests(unittest.TestCase):
             self.assertEqual(result.count('Signed-By:'), 2)
             self.assertNotIn('trusted=yes', result)
             self.assertNotIn('Check-Valid-Until: no', result)
+
+    def test_vm_dns_and_metadata_have_one_runtime_owner(self):
+        data = task('image_configure', 'Configure metadata sources for CloudStack')['ansible.builtin.copy']
+        config = yaml.safe_load(data['content'])
+        self.assertEqual(config['datasource_list'], ['CloudStack', 'ConfigDrive', 'None'])
+        self.assertEqual(config['system_info']['network'],
+                         {'renderers': ['netplan'], 'activators': ['netplan']})
+        deps = (ROOT / 'builders/diskimage-builder/elements/zs-configure/element-deps').read_text().splitlines()
+        self.assertIn('cloud-init', deps)
+        self.assertNotIn('cloud-init-datasources', deps)
+        env = jinja2.Environment(undefined=jinja2.StrictUndefined)
+        package_template = task('image_configure', 'Install shared image packages without starting services')['ansible.builtin.apt']['name']
+        service_template = task('image_configure', 'Enable services for the next guest boot only')['loop']
+        for target in ('cloudstack-kvm', 'proxmox-lxc'):
+            packages = yaml.safe_load(env.from_string(package_template).render(golden_target=target))
+            services = yaml.safe_load(env.from_string(service_template).render(golden_target=target))
+            for package in ('netplan.io', 'systemd-resolved'):
+                self.assertEqual(package in packages, target == 'cloudstack-kvm')
+            for service in ('systemd-networkd', 'systemd-resolved'):
+                self.assertEqual(service in services, target == 'cloudstack-kvm')
+
+    def test_build_dns_is_preserved_privately_around_package_installation(self):
+        names = [item['name'] for item in tasks('image_configure')]
+        preserve = task('image_configure', 'Preserve build DNS before installing the runtime resolver')
+        restore = task('image_configure', 'Restore build DNS until final image cleanup')
+        self.assertTrue(preserve['no_log'])
+        self.assertTrue(restore['no_log'])
+        self.assertFalse(restore['ansible.builtin.copy']['follow'])
+        self.assertEqual(preserve['when'], "golden_target == 'cloudstack-kvm'")
+        self.assertEqual(restore['when'], preserve['when'])
+        install = names.index('Install shared image packages without starting services')
+        self.assertLess(names.index(preserve['name']), install)
+        self.assertGreater(names.index(restore['name']), install)
+
+    def test_cleanup_removes_private_resolvers_without_following_symlinks(self):
+        item = task('image_cleanup', 'Remove inherited resolver configuration after package operations')
+        self.assertEqual(tasks('image_cleanup')[-1]['name'], item['name'])
+        for target in ('cloudstack-kvm', 'proxmox-lxc'):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                etc = root / 'etc'
+                etc.mkdir()
+                run = root / 'run'
+                (run / 'systemd' / 'resolve').mkdir(parents=True)
+                private = root / 'private-resolver'
+                private.write_text('nameserver 192.0.2.1\nsearch private.invalid\n')
+                (etc / 'resolv.conf').symlink_to(private)
+                (etc / 'resolv.conf.ORIG').write_text(private.read_text())
+                if target == 'cloudstack-kvm':
+                    (etc / '.resolv.conf.systemd-resolved.bak').write_text(private.read_text())
+                    (run / 'systemd' / 'resolve' / 'stub-resolv.conf').write_text(private.read_text())
+                mountpoint = root / 'mountpoint'
+                mountpoint.write_text('#!/bin/sh\nexit 1\n')
+                mountpoint.chmod(0o700)
+                script = item['ansible.builtin.shell'].replace('/etc', shlex.quote(str(etc))).replace(' /run', ' ' + shlex.quote(str(run)))
+                result = subprocess.run(['/bin/sh', '-c', script], text=True, capture_output=True,
+                                        env={**os.environ, 'PATH': directory + os.pathsep + os.environ['PATH'],
+                                             'GOLDEN_TARGET': target})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(private.read_text(), 'nameserver 192.0.2.1\nsearch private.invalid\n')
+                self.assertFalse((etc / 'resolv.conf.ORIG').exists())
+                if target == 'cloudstack-kvm':
+                    self.assertEqual(os.readlink(etc / 'resolv.conf'), '../run/systemd/resolve/stub-resolv.conf')
+                    self.assertFalse((etc / '.resolv.conf.systemd-resolved.bak').exists())
+                    self.assertFalse((run / 'systemd' / 'resolve' / 'stub-resolv.conf').exists())
+                else:
+                    self.assertFalse((etc / 'resolv.conf').is_symlink())
+                    self.assertEqual((etc / 'resolv.conf').read_bytes(), b'')
+
+    def test_build_dns_restore_replaces_symlink_without_modifying_its_target(self):
+        restore = task('image_configure', 'Restore build DNS until final image cleanup')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / 'stub-resolv.conf'
+            target.write_text('nameserver 127.0.0.53\n')
+            resolver = root / 'resolv.conf'
+            resolver.symlink_to(target)
+            arguments = dict(restore['ansible.builtin.copy'])
+            arguments.pop('owner')
+            arguments.pop('group')
+            arguments['dest'] = str(resolver)
+            arguments['content'] = 'nameserver 192.0.2.1\n'
+            minimal = [{'hosts': 'localhost', 'connection': 'local', 'gather_facts': False,
+                        'tasks': [{'ansible.builtin.copy': arguments, 'no_log': True}]}]
+            path = root / 'play.yml'
+            path.write_text(yaml.safe_dump(minimal))
+            result = subprocess.run(['ansible-playbook', '-i', 'localhost,', str(path)],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(resolver.is_symlink())
+            self.assertEqual(resolver.read_text(), 'nameserver 192.0.2.1\n')
+            self.assertEqual(target.read_text(), 'nameserver 127.0.0.53\n')
+
+    def test_vm_resolver_cleanup_guards_parents_and_mounts_without_following_leaf_links(self):
+        item = task('image_cleanup', 'Remove inherited resolver configuration after package operations')
+        cases = ('leaf-links', 'linked-etc', 'linked-run', 'linked-systemd', 'linked-resolve',
+                 'mounted-etc', 'mounted-run', 'mounted-systemd', 'mounted-resolve', 'mounted-stub', 'mounted-backup')
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                etc = root / 'etc'
+                etc.mkdir()
+                run = root / 'run'
+                resolve = run / 'systemd' / 'resolve'
+                resolve.mkdir(parents=True)
+                private = root / 'private'
+                private.mkdir()
+                secret = private / 'stub-resolv.conf'
+                secret.write_text('nameserver 192.0.2.1\nsearch private.invalid\n')
+                resolver = etc / 'resolv.conf'
+                resolver.write_text(secret.read_text())
+                backup = etc / '.resolv.conf.systemd-resolved.bak'
+                stub = resolve / 'stub-resolv.conf'
+                if case == 'leaf-links':
+                    backup.symlink_to(secret)
+                    stub.symlink_to(secret)
+                elif case.startswith('linked-'):
+                    parent = {'etc': etc, 'run': run, 'systemd': run / 'systemd', 'resolve': resolve}[case[7:]]
+                    parent.rename(root / 'original-parent')
+                    parent.symlink_to(private)
+                else:
+                    backup.write_text(secret.read_text())
+                    stub.write_text(secret.read_text())
+                mounted = {'etc': etc, 'run': run, 'systemd': run / 'systemd', 'resolve': resolve,
+                           'stub': stub, 'backup': backup}.get(case[8:]) if case.startswith('mounted-') else None
+                mountpoint = root / 'mountpoint'
+                mountpoint.write_text('#!/bin/sh\n' + ('test "$2" = ' + shlex.quote(str(mounted)) + '\n' if mounted else 'exit 1\n'))
+                mountpoint.chmod(0o700)
+                script = item['ansible.builtin.shell'].replace('/etc', shlex.quote(str(etc))).replace(' /run', ' ' + shlex.quote(str(run)))
+                result = subprocess.run(['/bin/sh', '-c', script], capture_output=True, text=True,
+                                        env={**os.environ, 'PATH': directory + os.pathsep + os.environ['PATH'],
+                                             'GOLDEN_TARGET': 'cloudstack-kvm'})
+                self.assertEqual(result.returncode == 0, case == 'leaf-links', result.stderr)
+                self.assertEqual(secret.read_text(), 'nameserver 192.0.2.1\nsearch private.invalid\n')
+                if case == 'leaf-links':
+                    self.assertFalse(backup.is_symlink())
+                    self.assertFalse(stub.is_symlink())
+                elif case != 'linked-etc':
+                    self.assertEqual(resolver.read_text(), secret.read_text())
+
+    def test_cleanup_refuses_a_mounted_resolver_before_removing_it(self):
+        item = task('image_cleanup', 'Remove inherited resolver configuration after package operations')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            resolver = root / 'resolv.conf'
+            resolver.write_text('nameserver 192.0.2.1\n')
+            mountpoint = root / 'mountpoint'
+            mountpoint.write_text('#!/bin/sh\nexit 0\n')
+            mountpoint.chmod(0o700)
+            script = item['ansible.builtin.shell'].replace('/etc/resolv.conf', shlex.quote(str(resolver)))
+            result = subprocess.run(['/bin/sh', '-c', script], capture_output=True, text=True,
+                                    env={**os.environ, 'PATH': directory + os.pathsep + os.environ['PATH'],
+                                         'GOLDEN_TARGET': 'cloudstack-kvm'})
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(resolver.read_text(), 'nameserver 192.0.2.1\n')
+
+    def test_ansible_state_cleanup_removes_residue_and_refuses_linked_root(self):
+        source = (ROOT / 'scripts/configure-rootfs.sh').read_text()
+        self.assertLess(source.index('/opt/zs-golden-images/venv/bin/ansible-playbook'),
+                        source.index("<<'CLEAN_ANSIBLE'"))
+        script = source.split("<<'CLEAN_ANSIBLE'\n", 1)[1].split('\nCLEAN_ANSIBLE', 1)[0]
+        for linked in (False, True):
+            with self.subTest(linked=linked), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                home = root / 'root'
+                home.mkdir()
+                external = root / 'private'
+                external.mkdir()
+                (external / 'keep').write_text('unchanged')
+                if linked:
+                    (home / '.ansible').symlink_to(external)
+                else:
+                    (home / '.ansible' / 'tmp').mkdir(parents=True)
+                    (home / '.ansible' / 'tmp' / 'module').write_text('temporary')
+                    (home / '.ansible' / 'outside').symlink_to(external)
+                mountpoint = root / 'mountpoint'
+                mountpoint.write_text('#!/bin/sh\nexit 1\n')
+                mountpoint.chmod(0o700)
+                result = subprocess.run(['/bin/sh', '-c', script.replace('/root', shlex.quote(str(home)))],
+                                        capture_output=True, text=True,
+                                        env={**os.environ, 'PATH': directory + os.pathsep + os.environ['PATH']})
+                self.assertEqual(result.returncode != 0, linked, result.stderr)
+                self.assertEqual((external / 'keep').read_text(), 'unchanged')
+                if not linked:
+                    self.assertFalse((home / '.ansible').exists())
+
+    def test_audit_accepts_external_acceptance_provenance_without_accepting_lxc(self):
+        source = (ROOT / 'scripts/audit-guest.sh').read_text()
+        expression = source.split("jq -e --arg p \"$profile\" '", 1)[1].split("' /etc/golden-image.json", 1)[0]
+        provenance = {'profile': 'debian-13', 'source_commit': 'a' * 40, 'source_kind': 'apt-snapshot',
+                      'source_manifest_sha256': 'b' * 64, 'target': 'cloudstack-kvm',
+                      'acceptance_source': 'signed-release-metadata'}
+        for update, accepted in [({}, True), ({'target': 'proxmox-lxc'}, False),
+                                 ({'acceptance_source': 'self-approved'}, False),
+                                 ({'source_commit': 'invalid'}, False)]:
+            with self.subTest(update=update):
+                result = subprocess.run(['jq', '-e', '--arg', 'p', 'debian-13', expression],
+                                        input=json.dumps({**provenance, **update}), text=True, capture_output=True)
+                self.assertEqual(result.returncode == 0, accepted, result.stderr)
+
+    def test_remediation_control_choices_set_real_ansible_facts(self):
+        play = yaml.safe_load((ROOT / 'ansible/playbooks/50-remediate-vm.yml').read_text())[0]
+        setting = next(item for item in play['pre_tasks'] if item['name'] == 'Apply reviewed per-control selections')
+        minimal = [{'hosts': 'localhost', 'connection': 'local', 'gather_facts': False,
+                    'vars': {'golden_cis_rule_settings': {'deb13cis_rule_5_2_4': False,
+                                                        'deb13cis_rule_1_1_1_1': True}},
+                    'tasks': [setting, {'ansible.builtin.assert': {'that': [
+                        'not deb13cis_rule_5_2_4', 'deb13cis_rule_1_1_1_1']}}]}]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'play.yml'
+            path.write_text(yaml.safe_dump(minimal))
+            result = subprocess.run(['ansible-playbook', '-i', 'localhost,', str(path)],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_adapter_rejects_invalid_phase_before_execution(self):
         result = subprocess.run([str(ROOT / 'scripts/configure-rootfs.sh'), 'oops', 'debian-13',

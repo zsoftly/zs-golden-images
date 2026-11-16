@@ -70,17 +70,19 @@
       ansible.builtin.slurp:
         src: /etc/golden-image.json
       register: golden_candidate_provenance
-    - name: Require matching experimental VM provenance
+    - name: Require matching VM provenance with external acceptance
       tags: always
       ansible.builtin.assert:
         that:
           - (golden_candidate_provenance.content | b64decode | from_json).profile == golden_profile
           - (golden_candidate_provenance.content | b64decode | from_json).target == 'cloudstack-kvm'
-          - (golden_candidate_provenance.content | b64decode | from_json).status == 'experimental-unaccepted'
+          - (golden_candidate_provenance.content | b64decode | from_json).acceptance_source == 'signed-release-metadata'
           - (golden_profile == 'debian-13' and ansible_facts.distribution == 'Debian' and ansible_facts.distribution_major_version == '13') or (golden_profile == 'ubuntu-26.04' and ansible_facts.distribution == 'Ubuntu' and ansible_facts.distribution_version == '26.04')
     - name: Apply reviewed per-control selections
       tags: always
-      ansible.builtin.set_fact: "{{ golden_cis_rule_settings }}"
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ golden_cis_rule_settings | dict2items }}"
   tasks:
     - name: Execute the pinned runtime role with Level 2 and embedded audits disabled
       tags: always
@@ -104,4 +106,4 @@
         owner: root
         group: root
         mode: '0644'
-        content: "{{ {'commit': golden_cis_pin.commit, 'benchmark_version': golden_cis_pin.benchmark_version, 'rules': golden_cis_rule_settings, 'exceptions': golden_cis_exceptions, 'status': 'requires-reboot-audit-recapture', 'promotion_allowed': false} | to_nice_json }}\n"
+        content: "{{ {'commit': golden_cis_pin.commit, 'benchmark_version': golden_cis_pin.benchmark_version, 'rules': golden_cis_rule_settings, 'exceptions': golden_cis_exceptions, 'stage': 'runtime-remediation', 'required_acceptance_steps': ['reboot', 'audit', 'recapture'], 'acceptance_source': 'signed-release-metadata'} | to_nice_json }}\n"

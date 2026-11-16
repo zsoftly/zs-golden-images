@@ -48,7 +48,7 @@ The active entry point is [scripts/pipeline.sh](scripts/pipeline.sh). Select one
 - `source_date_epoch`: the positive integer Unix timestamp matching `snapshot_id`, recorded for the build.
 - `inrelease_sha256`: an object containing lowercase SHA256 values for `base`, `updates`, and `security` repository metadata. Establish these through the approved source-verification process before use.
 
-The profile selects `trixie`, `trixie-updates`, and `trixie-security` for Debian, or `resolute`, `resolute-updates`, and `resolute-security` for Ubuntu. Repository signing and release support must work with the installed debootstrap and distribution keyrings. A timestamp in a URL does not prove the server preserves immutable content. Builds permit expired `Valid-Until` dates for the explicitly pinned historical snapshot. Package signature verification and pre/post-build InRelease hash checks remain enabled. Cleanup removes this build-only expiry exception and restores normal signed update repositories for guest runtime.
+The profile selects `trixie`, `trixie-updates`, and `trixie-security` for Debian, or `resolute`, `resolute-updates`, and `resolute-security` for Ubuntu. Bootstrap installs both distribution archive keyrings. Builds require the selected keyring, verify pinned InRelease signatures with `gpgv`, and supply explicit trusted keys to both upstream builders. DIB also forces debootstrap signature verification. A timestamp in a URL does not prove the server preserves immutable content. Builds permit expired `Valid-Until` dates for the explicitly pinned historical snapshot. Package signature verification and pre/post-build InRelease signature and hash checks remain enabled. Cleanup removes this build-only expiry exception and restores normal signed update repositories for guest runtime.
 
 Set `SITE` to the absolute private input path. Validation checks inputs without downloading sources or contacting infrastructure:
 
@@ -57,19 +57,20 @@ Set `SITE` to the absolute private input path. Validation checks inputs without 
 ./scripts/pipeline.sh validate debian-13 proxmox-lxc "$SITE"
 ```
 
-Use `ubuntu-26.04` with its own matching input file. After the dedicated builder handoff and explicit live-build approval, run from a clean committed checkout on that host:
+Use `ubuntu-26.04` with its own matching input file. After the dedicated builder handoff and explicit live-build approval, set `CHECKOUT` to the approved absolute path of a root-owned, clean committed checkout on that host. Keep the checkout and its parent directories protected from writes by other users. Run as root:
 
 ```bash
+cd -- "$CHECKOUT"
 GOLDEN_APPLY=build ./scripts/pipeline.sh build debian-13 cloudstack-kvm "$SITE"
 ```
 
 The active builder requires an amd64 Linux host, root, the Ansible-installed dedicated-builder marker, and native debootstrap support for the selected release. It refuses Proxmox hosts, serializes builds with a lock, and creates a new workspace for each profile, target, and version. Existing version workspaces are retained and rejected, including failed attempts; inspect them before separately authorized cleanup.
 
-The pipeline rechecks repository metadata, records source and builder inputs, and produces a candidate manifest beside the artifact. Bootstrap installs hash-locked Python dependencies; each build checks the reviewed lock, installed dependency inventory, and builder executable hashes against the recorded toolchain. That toolchain record is included in candidate provenance. A completed candidate exits with status `2` because live compatibility and security acceptance remain outstanding. Status `0` from input validation is not an image-build result. No pipeline build command signs, publishes, or imports a production template.
+The pipeline rechecks repository metadata, records source and builder inputs, and produces a candidate manifest beside the artifact. Bootstrap installs hash-locked Python dependencies and SHA256-pinned Ansible collection archives. Each build checks the reviewed locks, installed Python inventory, installed collection contents, and builder executable hashes against the recorded toolchain. That toolchain record is included in candidate provenance. A completed candidate exits with status `2` because live compatibility and security acceptance remain outstanding. Status `0` from input validation is not an image-build result. No pipeline build command signs, publishes, or imports a production template.
 
 ## Development and operational boundary
 
-Prepare code, unit tests, static checks, Ansible roles, and setup documentation before hardware arrives. The infrastructure owner supplies the dedicated server, private inventory, workspace filesystem, isolated network, and verified access. Obtain approval after that handoff before installing the builder or starting live image builds.
+Continue code, unit tests, static checks, Ansible roles, and setup documentation while infrastructure preparation is pending. The infrastructure owner supplies the dedicated server, private inventory, workspace filesystem, isolated network, and verified access. Obtain approval after that handoff before installing the builder or starting live image builds.
 
 Keep site configuration, credentials, raw audits, build logs, and acceptance evidence outside this public checkout. Generic images contain no organization staff keys, enrollment credentials, or enrolled Wazuh identity. Managed enrollment and access policy belong to authorized provisioning; customer images require customer-supplied settings or an explicit managed-service agreement.
 
@@ -77,7 +78,7 @@ The retained Packer implementation appears below as a legacy path. It is not a d
 
 ## Ansible builder setup
 
-The infrastructure owner must provide a dedicated amd64 bare-metal Debian 13 or Ubuntu 26.04 host, an existing protected workspace, isolated networking, and verified SSH access. The bootstrap installs pinned tools and writes a dedicated-builder marker. It does not format disks, configure the network, or enable GitHub Actions.
+The infrastructure owner must provide a dedicated amd64 bare-metal Debian 13 or Ubuntu 26.04 host, an existing protected workspace, isolated networking, and verified SSH access. The bootstrap requires the workspace and its parent directories to be root-owned and protected before installation. It installs pinned tools and writes a dedicated-builder marker. It does not create the workspace, format disks, configure the network, or enable GitHub Actions.
 
 Set `INVENTORY` and `BUILDER_VARS` to absolute private paths. The inventory group is `golden_builders`; the variables must identify the approved dedicated workspace and set `golden_builder_approved: true` and `golden_builder_region: yow`. The marker reflects the current deployment boundary. An approval variable is not a substitute for operator authorization.
 
@@ -99,9 +100,17 @@ Do not repurpose production Proxmox hosts. Keep temporary root filesystems, disk
 
 Both upstream builders call the same guarded Ansible rootfs adapter for `configure`, `harden`, and `cleanup`. The adapter is a build hook, not a general command for modifying arbitrary host directories. It requires the dedicated workspace and matching source metadata.
 
+The LXC path runs all three phases in a private mount namespace with selected device nodes, proc, read-only sysfs, and a temporary `/run`. The wrapper unmounts them on exit before distrobuilder packs the root filesystem. Mount behavior still requires validation during the first authorized Linux build.
+
+Ansible owns the VM datasource list: `CloudStack`, `ConfigDrive`, and `None`. The DIB configuration does not add a competing datasource list. Verify both CloudStack metadata delivery paths during live acceptance.
+
 The offline hardening role writes an explicit `offline-l1-subset` record. It configures key-based SSH, local password policy, root password locking, default permissions, account-file permissions, core-dump limits, and VM-only kernel settings. Filesystem layout, firewall policy, audit rules, bootloader policy, account lockout, and full benchmark mapping still require separate coverage. Password-history enforcement is configured but requires runtime verification. Container host-owned controls are recorded as such. This baseline does not claim a complete CIS Level 1 implementation.
 
-Cleanup captures package versions, removes build identities and temporary state, resets machine identity, and prepares unique SSH host keys on first boot. It replaces private build snapshot sources with signed public distribution update repositories in the final image. The pinned build package selection therefore differs from the intentionally current repositories used for later guest patching.
+In-image provenance and hardening records use `acceptance_source: signed-release-metadata`; release acceptance is recorded outside the immutable image. The hardening record's `cis_complete: false` describes the offline subset's coverage. It does not override a later signed release assessment. Candidate manifests and experimental audit reports still block promotion until their separate acceptance gates pass.
+
+Cleanup captures package versions, removes build identities and temporary state, resets machine identity, and prepares unique SSH host keys on first boot. It removes inherited resolver contents and DIB's resolver backup. VM cleanup also removes `/etc/.resolv.conf.systemd-resolved.bak` and `/run/systemd/resolve/stub-resolv.conf`, which package installation can populate with builder DNS settings. VM artifacts retain a resolver symlink to the stub generated at runtime; LXC archives contain an empty regular `/etc/resolv.conf` for Proxmox provisioning. Resolver generation and DNS after provisioning still require live acceptance. The adapter removes `/root/.ansible` after Ansible finishes its cleanup phase.
+
+Cleanup replaces private build snapshot sources with signed public distribution update repositories in the final image. The pinned build package selection therefore differs from the intentionally current repositories used for later guest patching.
 
 Runtime playbooks operate only on explicitly authorized `golden_candidates` inventory entries. They are held until the dedicated environment is ready and live work is approved. Set `RUNTIME_INVENTORY` and `RUNTIME_VARS` to private files naming the exact disposable guests and target policy:
 
@@ -135,7 +144,7 @@ GOLDEN_APPLY=remediate ./scripts/run-remediation.sh "$RUNTIME_INVENTORY" "$RUNTI
 python3 scripts/release.py inspect "$CANDIDATE"
 ```
 
-This validates artifact checksums and format-specific structure, not successful boot or compatibility. VM inspection requires `qemu-img`. LXC inspection checks the rootfs archive and captured identities.
+This validates artifact checksums and format-specific structure, not successful boot or compatibility. VM inspection requires `qemu-img`. LXC inspection checks the rootfs archive and captured identities, requires an empty regular `etc/resolv.conf`, and rejects a nonempty or nonregular `etc/resolv.conf.ORIG` if present.
 
 An authorized reviewer must sign a private approval JSON after reviewing real acceptance evidence. The approval uses `schema_version: 1`, the exact `candidate_sha256` and `artifact_sha256`, an unexpired `expires` date, and an `evidence` array of `{path, sha256}` entries. Each named check must have `status: passed` and an `evidence` array referring to those hashes. Evidence paths resolve relative to the approval file.
 
@@ -143,8 +152,12 @@ An authorized reviewer must sign a private approval JSON after reviewing real ac
 - CloudStack checks: `cloud_init`, `guest_agent`, and `cloudstack_compatibility`.
 - Proxmox LXC checks: `unprivileged_lxc`, `container_provisioning`, and `proxmox_compatibility`.
 - `vulnerability_scan` metadata: scanner `tool` and `version`, `database_sha256`, `database_updated` date, and `report_sha256` bound to the check's evidence. The current gate requires a database no older than seven days and integer `critical: 0` and `high: 0` counts.
+- Each item bound to `cis_coverage` must be a JSON object with `coverage: complete`, `raw_provenance: verified`, and `promotion_allowed: true`, regardless of its filename. List supporting manual artifacts separately and include their assessment in the complete coverage record.
+- `secret_scan` must inspect `/etc/resolv.conf`, `/etc/resolv.conf.ORIG`, `/etc/.resolv.conf.systemd-resolved.bak`, and `/run/systemd/resolve/stub-resolv.conf` for inherited nameservers and search domains, including inside VM disks that format inspection does not mount.
 
-Do not manufacture passing entries to exercise the release path. Incomplete audit coverage or unverified audit provenance blocks approval. Reviewers assess the evidence; the script verifies signatures, identities, hashes, required fields, and release policy. The existing experimental audit report alone cannot satisfy this gate.
+Do not manufacture passing entries to exercise the release path. JSON evidence reporting incomplete coverage, unverified provenance, or blocked promotion prevents approval regardless of its filename or acceptance check. Text evidence carrying the audit adapter's matching blocked markers also prevents approval. Reviewers assess the evidence; the script verifies signatures, identities, hashes, required fields, and release policy. The existing experimental audit report alone cannot satisfy this gate.
+
+Obtain the expected reviewer and signer fingerprints through the approved organizational process, independently of the candidate and its supplied signatures. They are trusted operator inputs: the CLI proves cryptographic binding to those keys, not organizational authorization or separation of duties. Protect the invoking account, keyring, and any automation supplying those arguments. Perform approval and signing in an approved release environment outside the builder; keep private review and signing keys off the builder.
 
 Set `APPROVAL` and `APPROVAL_SIGNATURE` to the private reviewed document and detached signature, `REVIEWER` and `SIGNER` to full trusted OpenPGP fingerprints, and `GPG_HOME` to the private keyring. `RELEASE_DIR` must be a new absolute directory outside the checkout. After acceptance approval:
 
@@ -154,7 +167,7 @@ python3 scripts/release.py prepare "$CANDIDATE" "$APPROVAL" "$APPROVAL_SIGNATURE
 python3 scripts/release.py verify "$RELEASE_DIR" --signer "$SIGNER" --gpg-home "$GPG_HOME"
 ```
 
-Preparation copies the artifact and writes sanitized release metadata, `SHA256SUMS`, and a detached signature. Private raw audit and acceptance evidence are not included. Keep signing keys outside the source tree and images. Verify the expected signer and checksums before every import, including rollback to an earlier approved version.
+Preparation copies the artifact and writes sanitized release metadata, `SHA256SUMS`, and a detached signature. Private raw audit and acceptance evidence are not included. Keep signing keys outside the source tree and images. Verify the independently trusted signer and checksums before every import, including rollback to an earlier approved version.
 
 Publication remains held. The optional publisher requires a private destination JSON with exactly `endpoint_url`, `bucket`, `prefix`, `region`, `canada_storage_approved: true`, and `conditional_writes_verified: true`. Infra must verify the endpoint's Canadian storage policy, conditional writes, object versioning, and checksum upload/readback support. These flags record verified prerequisites; they do not establish them. Credentials use the AWS CLI's approved external credential configuration, never JSON fields or URLs.
 
@@ -184,7 +197,7 @@ Copy the repository and bundle through your approved transfer process to a separ
 GOLDEN_APPLY=audit ./scripts/audit-guest.sh debian-13 "$BUNDLE" "$EVIDENCE"
 ```
 
-Repeat with `ubuntu-26.04` and a matching bundle. The runner checks the OS, KVM guest type, experimental image provenance, audit commit, clean dependency tree, and executable checksum before executing checks with concurrency two. These guards do not establish inventory authorization; the operator must identify an approved disposable clone. Never run this on an existing workload or a customer VM.
+Repeat with `ubuntu-26.04` and a matching bundle. The runner checks the OS, KVM guest type, image provenance, audit commit, clean dependency tree, and executable checksum before executing checks with concurrency two. For the active pipeline, image provenance points to external acceptance metadata; it does not authorize the audit. The operator must identify an approved disposable clone. Never run this on an existing workload or a customer VM.
 
 Some upstream checks have side effects. The adapter disables Debian 1.2.2.1 (`apt update`), Ubuntu 7.2.3 (fixed temporary-file writes), Ubuntu 1.1.1.11 (an external helper), and 5.4.2.5 on both profiles (login shell startup). These omissions remain visible in the report and require replacement evidence. Auditing also reads sensitive host configuration. Treat the whole evidence directory, including raw JSON and stderr, as private; directories use mode 0700 and files 0600. Keep it in approved storage and never upload it to the public repository.
 

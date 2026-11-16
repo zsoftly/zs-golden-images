@@ -1,12 +1,28 @@
 ---
+- name: Preserve build DNS before installing the runtime resolver
+  ansible.builtin.slurp:
+    src: /etc/resolv.conf
+  register: golden_build_resolver
+  no_log: true
+  when: golden_target == 'cloudstack-kvm'
 - name: Install shared image packages without starting services
   ansible.builtin.apt:
-    name: "{{ ['ca-certificates', 'openssh-server', 'python3', 'sudo', 'iproute2', 'iputils-ping', 'rsyslog', 'libpam-pwquality'] + (['cloud-init', 'qemu-guest-agent', 'chrony'] if golden_target == 'cloudstack-kvm' else []) }}"
+    name: "{{ ['ca-certificates', 'openssh-server', 'python3', 'sudo', 'iproute2', 'iputils-ping', 'rsyslog', 'libpam-pwquality'] + (['cloud-init', 'qemu-guest-agent', 'chrony', 'netplan.io', 'systemd-resolved'] if golden_target == 'cloudstack-kvm' else []) }}"
     state: present
     update_cache: true
     install_recommends: false
     policy_rc_d: 101
     lock_timeout: 300
+- name: Restore build DNS until final image cleanup
+  ansible.builtin.copy:
+    dest: /etc/resolv.conf
+    content: "{{ golden_build_resolver.content | b64decode }}"
+    owner: root
+    group: root
+    mode: '0644'
+    follow: false
+  no_log: true
+  when: golden_target == 'cloudstack-kvm'
 - name: Remove VM-only services from container roots
   ansible.builtin.apt:
     name:
@@ -35,6 +51,10 @@
       disable_root: true
       ssh_pwauth: false
       ssh_deletekeys: true
+      system_info:
+        network:
+          renderers: [netplan]
+          activators: [netplan]
   when: golden_target == 'cloudstack-kvm'
 - name: Enable services for the next guest boot only
   ansible.builtin.command:
@@ -43,7 +63,7 @@
       - enable
       - --no-reload
       - "{{ item }}"
-  loop: "{{ ['ssh', 'rsyslog'] + (['chrony'] if golden_target == 'cloudstack-kvm' else []) }}"
+  loop: "{{ ['ssh', 'rsyslog'] + (['chrony', 'systemd-networkd', 'systemd-resolved'] if golden_target == 'cloudstack-kvm' else []) }}"
   register: golden_enable_service
   changed_when: "'Created symlink' in golden_enable_service.stderr"
 - name: Record source manifest provenance
@@ -52,7 +72,7 @@
     owner: root
     group: root
     mode: '0644'
-    content: "{{ {'profile': golden_profile, 'target': golden_target, 'image_version': golden_image_version, 'source_commit': golden_source_commit, 'source_kind': golden_source_kind, 'source_manifest_sha256': golden_source_image_sha256, 'status': 'experimental-unaccepted'} | to_nice_json }}\n"
+    content: "{{ {'profile': golden_profile, 'target': golden_target, 'image_version': golden_image_version, 'source_commit': golden_source_commit, 'source_kind': golden_source_kind, 'source_manifest_sha256': golden_source_image_sha256, 'acceptance_source': 'signed-release-metadata'} | to_nice_json }}\n"
 - name: Reject inherited enrollment or administrative identity
   ansible.builtin.command:
     argv:

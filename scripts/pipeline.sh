@@ -34,6 +34,7 @@ fi
 [[ $(uname -s) == Linux && $(uname -m) == x86_64 && $EUID == 0 ]] || fail 'Builds require root on the dedicated amd64 Linux builder.'
 [[ ! -e /etc/pve ]] || fail 'Never run the active pipeline on a Proxmox host.'
 export PATH=/opt/zs-golden-images/venv/bin:/opt/zs-golden-images/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PYTHONDONTWRITEBYTECODE=1
 python3 - "$workspace" <<'PY'
 import json, os, pathlib, stat, sys
 workspace = pathlib.Path(sys.argv[1])
@@ -49,9 +50,9 @@ PY
 source_status=$(git -C "$repo" status --porcelain --untracked-files=all) || fail 'Cannot verify source checkout.'
 [[ -z "$source_status" ]] || fail 'Live builds require a clean committed source checkout.'
 source_commit=$(git -C "$repo" rev-parse HEAD)
-for dependency in curl sha256sum flock debootstrap; do command -v "$dependency" >/dev/null || fail "Missing builder tool: $dependency"; done
-python3 - "$repo/builders/pins.json" "$repo/ansible/requirements-builder.lock" <<'PY'
-import hashlib, json, pathlib, stat, subprocess, sys
+for dependency in curl sha256sum flock debootstrap gpg gpgv unshare mount; do command -v "$dependency" >/dev/null || fail "Missing builder tool: $dependency"; done
+python3 - "$repo/builders/pins.json" "$repo/ansible/requirements-builder.lock" "$repo/ansible/roles/builder/files" <<'PY'
+import hashlib, importlib.util, json, pathlib, stat, subprocess, sys
 record = pathlib.Path('/etc/zs-golden-images/toolchain.json')
 st = record.lstat()
 if record.is_symlink() or st.st_uid != 0 or stat.S_IMODE(st.st_mode) != 0o600:
@@ -63,6 +64,13 @@ if hashlib.sha256(pathlib.Path(sys.argv[2]).read_bytes()).hexdigest() != install
 freeze = subprocess.check_output(['/opt/zs-golden-images/venv/bin/python', '-m', 'pip', 'freeze', '--all'])
 if hashlib.sha256(freeze).hexdigest() != installed.get('python_inventory_sha256'):
     raise SystemExit('Installed Python dependency inventory changed since bootstrap')
+collection_files = pathlib.Path(sys.argv[3])
+spec = importlib.util.spec_from_file_location('collection_integrity', collection_files / 'collection_integrity.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+pins = json.loads((collection_files / 'collections.json').read_text())
+if module.inventory('/opt/zs-golden-images/collections', pins) != installed.get('collections'):
+    raise SystemExit('Installed Ansible collections differ from the reviewed toolchain')
 for name, path in {
     'diskimage_builder': '/opt/zs-golden-images/venv/bin/disk-image-create',
     'distrobuilder': '/opt/zs-golden-images/bin/distrobuilder',
@@ -78,6 +86,11 @@ for name, path in {
         raise SystemExit('Builder executable does not match its installation record')
 PY
 [[ -e "/usr/share/debootstrap/scripts/$release" ]] || fail 'Installed debootstrap must natively support the requested release.'
+case "$distribution" in
+  debian) archive_keyring=/usr/share/keyrings/debian-archive-keyring.gpg ;;
+  ubuntu) archive_keyring=/usr/share/keyrings/ubuntu-archive-keyring.gpg ;;
+esac
+[[ -s "$archive_keyring" && -r "$archive_keyring" ]] || fail 'Install the requested distribution archive keyring before building.'
 umask 077
 exec 9> "$workspace/.build.lock"
 flock -n 9 || fail 'Another image build owns the dedicated builder lock.'
@@ -100,12 +113,17 @@ verify_sources() {
     curl --fail --silent --show-error --proto '=https' --proto-redir '=https' --location --connect-timeout 15 --max-time 120 "$url" -o "$run/$suite.InRelease"
     expected=$(jq -r --arg s "$suite" '.inrelease_sha256[$s]' "$site")
     [[ $(sha256sum "$run/$suite.InRelease" | awk '{print $1}') == "$expected" ]] || fail "Snapshot metadata changed: $suite"
+    gpgv --keyring "$archive_keyring" "$run/$suite.InRelease" >/dev/null 2>&1 || fail "Snapshot metadata signature is not trusted: $suite"
   done
 }
 verify_sources
+mkdir -- "$run/gnupg"
+chmod 0700 "$run/gnupg"
+gpg --batch --homedir "$run/gnupg" --no-default-keyring --keyring "$archive_keyring" --armor --export > "$run/archive-keys.asc"
+[[ -s "$run/archive-keys.asc" ]] || fail 'Distribution archive keyring contains no exportable trusted keys.'
 components=$(jq -r '.components|join(",")' <<< "$profile_json")
 epoch=$(jq -r .source_date_epoch "$site")
-common_env=(env -i "PATH=$PATH" HOME=/root LANG=C.UTF-8 ANSIBLE_COLLECTIONS_PATH=/opt/zs-golden-images/collections "TMPDIR=$run/tmp" "TMP_DIR=$run/tmp" "SOURCE_DATE_EPOCH=$epoch" GOLDEN_APPLY=build)
+common_env=(env -i "PATH=$PATH" PYTHONDONTWRITEBYTECODE=1 HOME=/root LANG=C.UTF-8 ANSIBLE_COLLECTIONS_PATH=/opt/zs-golden-images/collections "TMPDIR=$run/tmp" "TMP_DIR=$run/tmp" "SOURCE_DATE_EPOCH=$epoch" GOLDEN_APPLY=build)
 if [[ "$target" == cloudstack-kvm ]]; then
   dib=/opt/zs-golden-images/venv/bin/disk-image-create
   expected_version=$(jq -r .diskimage_builder.version "$repo/builders/pins.json")
@@ -113,8 +131,8 @@ if [[ "$target" == cloudstack-kvm ]]; then
   apt_sources=$(printf 'default:deb [check-valid-until=no] %s %s %s\nupdates:deb [check-valid-until=no] %s %s-updates %s\nsecurity:deb [check-valid-until=no] %s %s-security %s\n' "$mirror" "$release" "${components//,/ }" "$mirror" "$release" "${components//,/ }" "$security_mirror" "$release" "${components//,/ }")
   "${common_env[@]}" "DIB_RELEASE=$release" "DIB_DISTRIBUTION_MIRROR=$mirror" "DIB_DEBIAN_SECURITY_MIRROR=$security_mirror" \
     "DIB_APT_SOURCES_CONF=$apt_sources" "DIB_DEBIAN_COMPONENTS=$components" DIB_UBUNTU_MIRROR_DISTS=updates,security \
-    "DIB_DEBIAN_DEBOOTSTRAP_SCRIPT=/usr/share/debootstrap/scripts/$release" DIB_DEBOOTSTRAP_EXTRA_ARGS=--include=ca-certificates \
-    "DIB_IMAGE_CACHE=$run/cache" DIB_CLOUD_INIT_DATASOURCES=CloudStack DIB_DEBUG_TRACE=0 \
+    "DIB_DEBIAN_DEBOOTSTRAP_SCRIPT=/usr/share/debootstrap/scripts/$release" "DIB_DEBOOTSTRAP_EXTRA_ARGS=--include=ca-certificates --force-check-gpg --keyring=$archive_keyring" \
+    "DIB_IMAGE_CACHE=$run/cache" DIB_APT_MINIMAL_CREATE_INTERFACES=0 DIB_DEBUG_TRACE=0 \
     "ELEMENTS_PATH=$repo/builders/diskimage-builder/elements" "ZS_SOURCE=$repo" "ZS_PROFILE=$profile" "ZS_METADATA=$run/metadata.json" \
     "$dib" -a amd64 -t qcow2 --no-tmpfs --image-size 16 -o "$run/output/$profile-$version" \
     "$(jq -r .dib_element <<< "$profile_json")" vm block-device-mbr zs-configure
@@ -124,18 +142,16 @@ else
   distrobuilder=/opt/zs-golden-images/bin/distrobuilder
   expected_version=$(jq -r .distrobuilder.version "$repo/builders/pins.json")
   [[ $("$distrobuilder" --version) == "$expected_version" ]] || fail 'Unexpected distrobuilder version.'
-  jq -n --arg distro "$distribution" --arg release "$release" --arg version "$version" --arg mirror "$mirror" --arg security "$security_mirror" --argjson components "$(jq .components <<< "$profile_json")" \
+  jq -n --arg distro "$distribution" --arg release "$release" --arg version "$version" --arg mirror "$mirror" --arg security "$security_mirror" --argjson components "$(jq .components <<< "$profile_json")" --rawfile archive_keys "$run/archive-keys.asc" \
     '{image:{distribution:$distro,release:$release,architecture:"x86_64",serial:$version,variant:"default"},
-      source:{downloader:"debootstrap",url:$mirror,variant:"minbase",components:$components,skip_verification:false},
+      source:{downloader:"debootstrap",url:$mirror,variant:"minbase",components:$components,skip_verification:false,keys:[$archive_keys]},
       mappings:{architecture_map:"debian"},
       packages:{manager:"apt",update:true,cleanup:true,
         repositories:[{name:"sources.list",url:("deb [check-valid-until=no] " + $mirror + " " + $release + " " + ($components|join(" ")) + "\ndeb [check-valid-until=no] " + $mirror + " " + $release + "-updates " + ($components|join(" ")) + "\ndeb [check-valid-until=no] " + $security + " " + $release + "-security " + ($components|join(" ")))}],
         sets:[{packages:["ca-certificates"],action:"install",early:true},{packages:["python3","systemd-sysv"],action:"install"}]},
       targets:{lxc:{config:[{type:"all",after:4,content:"lxc.include = LXC_TEMPLATE_CONFIG/common.conf\nlxc.arch = x86_64"},{type:"user",after:4,content:"lxc.include = LXC_TEMPLATE_CONFIG/userns.conf"}]}}}' > "$run/lxc.json"
   "${common_env[@]}" "$distrobuilder" build-dir "$run/lxc.json" "$run/rootfs" --cache-dir "$run/cache"
-  for phase in configure harden cleanup; do
-    "${common_env[@]}" "$repo/scripts/configure-rootfs.sh" "$phase" "$profile" "$target" "$run/rootfs" "$run/metadata.json"
-  done
+  "${common_env[@]}" unshare --mount --propagation private --fork "$repo/scripts/configure-lxc-rootfs.sh" "$profile" "$run/rootfs" "$run/metadata.json"
   jq -f "$repo/builders/distrobuilder/pack.jq" "$run/lxc.json" > "$run/lxc-pack.json"
   "${common_env[@]}" "$distrobuilder" pack-lxc "$run/lxc-pack.json" "$run/rootfs" "$run/output" --compression xz --cache-dir "$run/cache"
   artifact="$run/output/rootfs.tar.xz"

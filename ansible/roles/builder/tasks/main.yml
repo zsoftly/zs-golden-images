@@ -57,8 +57,11 @@
       - python3-dev
       - build-essential
       - debootstrap
+      - debian-archive-keyring
+      - ubuntu-keyring
       - rsync
       - gnupg
+      - gpgv
       - squashfs-tools
       - qemu-utils
       - qemu-system-x86
@@ -176,18 +179,50 @@
       - "{{ golden_builder_prefix }}/requirements-builder.lock"
       - "{{ golden_builder_pins.diskimage_builder.version }}"
   changed_when: false
-- name: Install the pinned Ansible chroot collection
+- name: Read the reviewed collection artifact pins
+  ansible.builtin.set_fact:
+    golden_collection_pins: "{{ lookup('ansible.builtin.file', role_path + '/files/collections.json') | from_json }}"
+- name: Install the collection integrity checker
+  ansible.builtin.copy:
+    src: collection_integrity.py
+    dest: "{{ golden_builder_prefix }}/bin/collection_integrity.py"
+    owner: root
+    group: root
+    mode: '0755'
+- name: Download verified collection archives
+  ansible.builtin.get_url:
+    url: "{{ item.url }}"
+    dest: "{{ golden_builder_prefix }}/sources/{{ item.name }}-{{ item.version }}.tar.gz"
+    checksum: "sha256:{{ item.sha256 }}"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ golden_collection_pins }}"
+- name: Reinstall the reviewed collections from local verified archives
   ansible.builtin.command:
     argv:
       - "{{ golden_builder_prefix }}/venv/bin/ansible-galaxy"
       - collection
       - install
-      - community.general:12.5.0
-      - ansible.posix:2.1.0
+      - "{{ golden_builder_prefix }}/sources/{{ item.name }}-{{ item.version }}.tar.gz"
+      - --offline
+      - --no-deps
+      - --force
       - -p
       - "{{ golden_builder_prefix }}/collections"
-  register: golden_collection_install
-  changed_when: "'was installed successfully' in golden_collection_install.stdout"
+  environment:
+    PYTHONDONTWRITEBYTECODE: '1'
+  loop: "{{ golden_collection_pins }}"
+  changed_when: true
+- name: Measure the installed collection contents
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ golden_builder_prefix }}/bin/collection_integrity.py"
+      - "{{ golden_builder_prefix }}/collections"
+      - "{{ golden_collection_pins | to_json }}"
+  register: golden_collection_integrity
+  changed_when: false
 - name: Record installed Python dependencies
   ansible.builtin.command: "{{ golden_builder_prefix }}/venv/bin/python -m pip freeze --all"
   register: golden_python_freeze
@@ -232,4 +267,4 @@
     owner: root
     group: root
     mode: '0600'
-    content: "{{ golden_builder_pins | combine({'executables': {'diskimage_builder': golden_executables.results[0].stat.checksum, 'distrobuilder': golden_executables.results[1].stat.checksum}, 'python_lock_sha256': golden_dependency_records.results[0].stat.checksum, 'python_inventory_sha256': golden_dependency_records.results[1].stat.checksum, 'go_version': golden_go_identity.stdout, 'ansible_version': golden_ansible_identity.stdout_lines[0], 'collections': {'community.general': '12.5.0', 'ansible.posix': '2.1.0'}}) | to_nice_json }}\n"
+    content: "{{ golden_builder_pins | combine({'executables': {'diskimage_builder': golden_executables.results[0].stat.checksum, 'distrobuilder': golden_executables.results[1].stat.checksum}, 'python_lock_sha256': golden_dependency_records.results[0].stat.checksum, 'python_inventory_sha256': golden_dependency_records.results[1].stat.checksum, 'go_version': golden_go_identity.stdout, 'ansible_version': golden_ansible_identity.stdout_lines[0], 'collections': (golden_collection_integrity.stdout | from_json)}) | to_nice_json }}\n"

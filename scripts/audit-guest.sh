@@ -17,9 +17,10 @@ pin=$(jq -ce --arg p "$profile" '.profiles[$p] // error("Unsupported profile")' 
 # shellcheck disable=SC1091
 source /etc/os-release
 [[ ${ID:-} == "$(jq -r .os_id <<< "$pin")" && ${VERSION_ID:-} == "$(jq -r .os_version <<< "$pin")" ]] || fail 'OS does not match profile.'
-jq -e --arg p "$profile" '.profile == $p and .status == "experimental-unaccepted" and
+jq -e --arg p "$profile" '.profile == $p and
+  (if .source_kind == "apt-snapshot" then .acceptance_source == "signed-release-metadata" and .target == "cloudstack-kvm" else .status == "experimental-unaccepted" end) and
   (.source_commit | test("^[0-9a-f]{40}$")) and
-  ((if .source_kind == "apt-snapshot" then .source_manifest_sha256 else .source_image_sha256 end) | test("^[0-9a-f]{64}$"))' /etc/golden-image.json >/dev/null || fail 'Expected experimental golden-image provenance.'
+  ((if .source_kind == "apt-snapshot" then .source_manifest_sha256 else .source_image_sha256 end) | test("^[0-9a-f]{64}$"))' /etc/golden-image.json >/dev/null || fail 'Expected matching golden-image provenance; acceptance is recorded externally.'
 [[ "$bundle" == /* && -d "$bundle/content/.git" && -f "$bundle/syver" ]] || fail 'Supply a prepared bundle.'
 [[ $(git -C "$bundle/content" rev-parse HEAD) == "$(jq -r .audit_commit <<< "$pin")" ]] || fail 'Unexpected audit commit.'
 tree_status=$(git -C "$bundle/content" status --porcelain --untracked-files=all --ignored) || fail 'Cannot verify audit content.'

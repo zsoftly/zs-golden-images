@@ -1,0 +1,14 @@
+[
+  {
+    "name": "community.general",
+    "version": "12.5.0",
+    "url": "https://galaxy.ansible.com/api/v3/plugin/ansible/content/published/collections/artifacts/community-general-12.5.0.tar.gz",
+    "sha256": "3e290242a7f768c20d1e4ec2be4a82814f0207ab529c42fe720604e0ea2730cc"
+  },
+  {
+    "name": "ansible.posix",
+    "version": "2.1.0",
+    "url": "https://galaxy.ansible.com/api/v3/plugin/ansible/content/published/collections/artifacts/ansible-posix-2.1.0.tar.gz",
+    "sha256": "5ff232cf69492a991f2a0990dbb23ef25a600b7e9209de6e33377a6ff08a8a29"
+  }
+]

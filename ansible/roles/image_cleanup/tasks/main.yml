@@ -132,3 +132,34 @@
     owner: root
     group: root
     mode: '0755'
+- name: Remove inherited resolver configuration after package operations
+  ansible.builtin.shell: |
+    set -eu
+    test ! -L /etc
+    if mountpoint -q /etc; then exit 1; fi
+    set -- /etc/resolv.conf /etc/resolv.conf.ORIG
+    if [ "$GOLDEN_TARGET" = cloudstack-kvm ]; then
+      for parent in /run /run/systemd /run/systemd/resolve; do
+        test ! -L "$parent"
+        if mountpoint -q "$parent"; then exit 1; fi
+      done
+      # Both distro postinst scripts preserve build DNS in these two files.
+      set -- "$@" /etc/.resolv.conf.systemd-resolved.bak /run/systemd/resolve/stub-resolv.conf
+    fi
+    for path do
+      if mountpoint -q "$path"; then exit 1; fi
+    done
+    for path do
+      rm -f "$path"
+    done
+    # DIB honors a final resolver symlink and removes its saved .ORIG file.
+    if [ "$GOLDEN_TARGET" = cloudstack-kvm ]; then
+      ln -s ../run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+    else
+      install -m 0644 /dev/null /etc/resolv.conf
+    fi
+  args:
+    executable: /bin/sh
+  environment:
+    GOLDEN_TARGET: "{{ golden_target }}"
+  changed_when: true

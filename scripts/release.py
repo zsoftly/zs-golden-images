@@ -115,7 +115,7 @@ def inspect_artifact(path, target):
         require(not info.get("snapshots"), "Release disk must not contain internal snapshots")
         run(["qemu-img", "check", "-f", "qcow2", path])
     else:
-        required = {"etc/machine-id", "etc/golden-image.json"}
+        required = {"etc/machine-id", "etc/golden-image.json", "etc/resolv.conf"}
         os_release = False
         seen = set()
         with tarfile.open(path, "r:xz") as archive:
@@ -127,6 +127,9 @@ def inspect_artifact(path, target):
                 seen.add(str(name))
                 if str(name) in {"etc/os-release", "usr/lib/os-release"} and member.isfile():
                     os_release = True
+                if str(name) in {"etc/resolv.conf", "etc/resolv.conf.ORIG"}:
+                    require(member.isfile() and member.size == 0,
+                            "Image resolver configuration must be a regular empty file")
                 if str(name) in required:
                     require(member.isfile(), f"Required image identity is not a file: {name}")
                     if str(name) == "etc/machine-id":
@@ -154,18 +157,29 @@ def approval(candidate_path, approval_path, signature, reviewer, home):
     evidence = accepted.get("evidence", [])
     require(isinstance(evidence, list) and evidence, "No test evidence")
     hashes = set()
+    reports = {}
     for item in evidence:
         file = regular(Path(approval_path).parent / item["path"])
         require(digest(file) == item.get("sha256"), "Test evidence checksum mismatch")
         require(item["sha256"] not in hashes, "Duplicate evidence identity")
         hashes.add(item["sha256"])
-        if file.suffix == ".json":
+        try:
             report = load(file)
-            if isinstance(report, dict):
-                require(report.get("coverage") != "incomplete" and
-                        report.get("promotion_allowed") is not False and
-                        report.get("raw_provenance") != "unverified",
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            if isinstance(error, json.JSONDecodeError):
+                require(not re.search(r"^(?:Coverage:\s*incomplete\b|Promotion:\s*BLOCKED\b|"
+                                      r"Raw input provenance:\s*unverified\b)", error.doc,
+                                      re.MULTILINE | re.IGNORECASE),
                         "Incomplete or unverified audit evidence cannot approve release")
+            if file.suffix == ".json":
+                raise
+            report = None
+        reports[item["sha256"]] = report
+        if isinstance(report, dict):
+            require(report.get("coverage") != "incomplete" and
+                    report.get("promotion_allowed") is not False and
+                    report.get("raw_provenance") != "unverified",
+                    "Incomplete or unverified audit evidence cannot approve release")
     checks = accepted.get("checks", {})
     required = COMMON_CHECKS | TARGET_CHECKS[data["target"]]
     require(set(checks) == required, "Missing or unexpected acceptance checks")
@@ -173,6 +187,11 @@ def approval(candidate_path, approval_path, signature, reviewer, home):
         require(result.get("status") == "passed" and isinstance(result.get("evidence"), list)
                 and result["evidence"] and set(result["evidence"]) <= hashes,
                 f"Acceptance check has no passing bound evidence: {name}")
+    for evidence_hash in checks["cis_coverage"]["evidence"]:
+        report = reports[evidence_hash]
+        require(isinstance(report, dict) and report.get("coverage") == "complete" and
+                report.get("raw_provenance") == "verified" and report.get("promotion_allowed") is True,
+                "CIS coverage evidence must be JSON with complete, verified coverage and promotion allowed")
     scan = accepted.get("vulnerability_scan", {})
     require(isinstance(scan.get("tool"), str) and scan["tool"] and
             isinstance(scan.get("version"), str) and scan["version"] and
