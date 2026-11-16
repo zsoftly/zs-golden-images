@@ -123,6 +123,20 @@ gpg --batch --homedir "$run/gnupg" --no-default-keyring --keyring "$archive_keyr
 [[ -s "$run/archive-keys.asc" ]] || fail 'Distribution archive keyring contains no exportable trusted keys.'
 components=$(jq -r '.components|join(",")' <<< "$profile_json")
 epoch=$(jq -r .source_date_epoch "$site")
+if [[ "$target" == cloudstack-kvm ]]; then
+  # DIB invokes sudo -E in its host hooks; sudo-rs can ignore -E.
+  sudo_binary=/usr/bin/sudo
+  [[ ! -x /usr/bin/sudo.ws ]] || sudo_binary=/usr/bin/sudo.ws
+  [[ -x "$sudo_binary" ]] || fail 'Install classic sudo for diskimage-builder.'
+  mkdir -- "$run/host-bin"
+  ln -s -- "$sudo_binary" "$run/host-bin/sudo"
+  export PATH="$run/host-bin:$PATH"
+  # Expand these variables in sudo's child, not in this shell.
+  # shellcheck disable=SC2016
+  env -i "PATH=$PATH" ARCH=amd64 "SOURCE_DATE_EPOCH=$epoch" sudo -n -E /bin/sh -c \
+    '[ "$ARCH" = amd64 ] && [ "$SOURCE_DATE_EPOCH" = "$1" ]' sh "$epoch" \
+    || fail 'diskimage-builder requires sudo -E to preserve its build environment.'
+fi
 common_env=(env -i "PATH=$PATH" PYTHONDONTWRITEBYTECODE=1 HOME=/root LANG=C.UTF-8 ANSIBLE_COLLECTIONS_PATH=/opt/zs-golden-images/collections "TMPDIR=$run/tmp" "TMP_DIR=$run/tmp" "SOURCE_DATE_EPOCH=$epoch" GOLDEN_APPLY=build)
 if [[ "$target" == cloudstack-kvm ]]; then
   dib=/opt/zs-golden-images/venv/bin/disk-image-create

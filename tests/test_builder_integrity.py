@@ -70,6 +70,41 @@ class CollectionIntegrity(unittest.TestCase):
 
 
 class NativeBuilderPolicy(unittest.TestCase):
+    def test_vm_build_selects_sudo_that_preserves_architecture(self):
+        # Exercise the pipeline's actual preflight against sudo implementations
+        # that preserve or discard ARCH, without privilege changes or DIB.
+        source = (REPO / "scripts/pipeline.sh").read_text()
+        start = source.index('if [[ "$target" == cloudstack-kvm ]]; then', source.index('epoch=$(jq'))
+        body = source[start:source.index('common_env=(', start)]
+        for classic, preserves, target, success in (
+            (True, False, "cloudstack-kvm", True),
+            (False, True, "cloudstack-kvm", True),
+            (False, False, "cloudstack-kvm", False),
+            (False, False, "proxmox-lxc", True),
+        ):
+            with self.subTest(classic=classic, preserves=preserves, target=target):
+                with tempfile.TemporaryDirectory() as temp:
+                    root = Path(temp)
+                    binaries = root / "bin"
+                    binaries.mkdir()
+                    run = root / "run"
+                    run.mkdir()
+                    for name, keep in [("sudo", preserves)] + ([("sudo.ws", True)] if classic else []):
+                        executable = binaries / name
+                        executable.write_text('#!/bin/sh\n[ "$1" = -n ] && [ "$2" = -E ] || exit 9\nshift 2\n' + ('' if keep else 'unset ARCH\n') + 'exec "$@"\n')
+                        executable.chmod(0o755)
+                    original = (binaries / "sudo").read_bytes()
+                    runner = 'set -euo pipefail\nfail() { echo "$*" >&2; exit 1; }\nrun=$1; target=$2; epoch=1234567890\n' + body.replace('/usr/bin/', str(binaries) + '/')
+                    result = subprocess.run(["bash", "-c", runner, "sudo-test", str(run), target], text=True, capture_output=True)
+                    self.assertEqual(result.returncode == 0, success, result.stderr)
+                    self.assertEqual((binaries / "sudo").read_bytes(), original)
+                    if target == "cloudstack-kvm":
+                        self.assertEqual((run / "host-bin/sudo").resolve(), (binaries / ("sudo.ws" if classic else "sudo")).resolve())
+                    else:
+                        self.assertFalse((run / "host-bin").exists())
+                    if not success:
+                        self.assertIn("requires sudo -E", result.stderr)
+
     def test_lxc_mount_cleanup_runs_in_reverse_order_after_phase_failure(self):
         # Exercise the actual mount/phase/trap body with inert mount commands;
         # private namespace creation itself requires the authorized Linux host.
