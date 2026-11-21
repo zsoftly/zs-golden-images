@@ -149,15 +149,16 @@ def main():
               'not_tested': ['second-clone-uniqueness', 'proxmox-platform-compatibility', 'cloudstack-platform-compatibility',
                              'external-dns', 'network-provisioning', 'ntp-synchronization', 'full-cis', 'vulnerability-clearance', 'release-approval']}
     name = 'golden-smoke-' + os.urandom(4).hex()
-    lxcpath = evidence / 'lxc'
-    instance = lxcpath / name
-    instance.mkdir(parents=True)
+    runtime = evidence / 'lxc'
+    instance = runtime / name
     rootfs = instance / 'rootfs'
     visible = Path('/run') / name
+    visible_instance = visible / name
     key = evidence / 'admin-key'
     process = None
+    visible_created = False
     mounted = False
-    base = ['-P', str(lxcpath), '-n', name]
+    base = ['-P', str(visible), '-n', name]
     attach = ['lxc-attach', *base, '--clear-env', '--']
 
     def attach_run(argv, **kwargs):
@@ -192,7 +193,7 @@ def main():
     def start(logname):
         nonlocal process
         with (evidence / logname).open('w') as output:
-            process = subprocess.Popen(['lxc-start', *base, '-F', '-f', instance / 'config', '-L', evidence / (logname + '.console'),
+            process = subprocess.Popen(['lxc-start', *base, '-F', '-f', visible_instance / 'config', '-L', evidence / (logname + '.console'),
                                         '-o', evidence / (logname + '.lxc'), '-l', 'INFO'], stdout=output, stderr=subprocess.STDOUT,
                                        preexec_fn=vm.child_guard(os.getpid()))
         current = vm.wait_for(process, identity)
@@ -209,22 +210,26 @@ def main():
 
     try:
         run([site.tool_prefix / 'venv/bin/python', site.project / 'scripts/release.py', 'inspect', args.candidate], log=evidence / 'inspect.log')
+        # LXC checks traversal of -P after switching to mapped root. Keep the
+        # evidence private and give only the runtime tree a traversable alias.
+        instance.mkdir(parents=True)
+        runtime.chmod(0o711)
+        instance.chmod(0o711)
         extract(artifact, rootfs, args.id_base)
-        run(['mount', '--make-rprivate', '/'])
-        visible.mkdir(mode=0o711)
-        visible.chmod(0o711)  # Only this empty temporary path, never workspace ancestors.
-        (visible / 'rootfs').mkdir(mode=0o700)
-        run(['mount', '--bind', rootfs, visible / 'rootfs'])
-        mounted = True
         config = '\n'.join([
             'lxc.include = /usr/share/lxc/config/common.conf', 'lxc.include = /usr/share/lxc/config/userns.conf',
-            'lxc.arch = x86_64', 'lxc.rootfs.path = dir:' + str(visible / 'rootfs'), 'lxc.uts.name = ' + name,
+            'lxc.arch = x86_64', 'lxc.rootfs.path = dir:' + str(visible_instance / 'rootfs'), 'lxc.uts.name = ' + name,
             f'lxc.idmap = u 0 {args.id_base} 65536', f'lxc.idmap = g 0 {args.id_base} 65536',
             'lxc.net =', 'lxc.net.0.type = empty', 'lxc.apparmor.profile = generated',
             'lxc.apparmor.allow_nesting = 0', 'lxc.cgroup2.memory.max = 1073741824',
             'lxc.cgroup2.memory.swap.max = 0', 'lxc.cgroup2.pids.max = 512', 'lxc.cgroup2.cpu.max = 200000 100000',
             'lxc.tty.max = 0', 'lxc.pty.max = 64', ''])
         (instance / 'config').write_text(config)
+        run(['mount', '--make-rprivate', '/'])
+        visible.mkdir(mode=0o700)
+        visible_created = True
+        run(['mount', '--bind', runtime, visible])
+        mounted = True
         run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', key])
         public_key = key.with_suffix('.pub').read_text().strip()
         first, pid = start('first-boot.log')
@@ -288,13 +293,13 @@ def main():
             report['original_artifact_unchanged'] = digest(artifact) == original
             if not report['original_artifact_unchanged']:
                 report['status'] = 'failed'
-            if process is None and mounted:
-                result = run(['umount', visible / 'rootfs'], timeout=20, check=False)
-                if result.returncode:
-                    report.update(status='failed', cleanup_error='Private bind unmount failed')
-                else:
-                    (visible / 'rootfs').rmdir()
+            if process is None and visible_created:
+                try:
+                    if mounted:
+                        run(['umount', visible], timeout=20)
                     visible.rmdir()
+                except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+                    report.update(status='failed', cleanup_error=str(error))
             write_json(evidence / 'smoke-report.json', report)
             require(report['original_artifact_unchanged'], 'Original archive was modified')
     require(report['status'] == 'passed', 'Native smoke cleanup failed')
