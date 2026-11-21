@@ -122,6 +122,69 @@ class NativeSiteTests(unittest.TestCase):
             common.protected(link)
 
 
+class LxcRuntimePathTests(unittest.TestCase):
+    def test_start_and_stop_use_private_mount_alias(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            evidence = root / 'evidence' / 'attempt'
+            evidence.parent.mkdir(mode=0o700)
+            run_dir = root / 'run'
+            run_dir.mkdir()
+            artifact = root / 'rootfs.tar'
+            artifact.write_bytes(b'fixture')
+            candidate = root / 'candidate.json'
+            candidate.write_text(json.dumps({'target': 'proxmox-lxc', 'profile': 'debian-13',
+                                             'artifact': {'path': artifact.name, 'sha256': common.digest(artifact)}}))
+            site = SimpleNamespace(workspace=root, evidence=evidence.parent, project=root, tool_prefix=root,
+                                   runner_service='fixture', source_commit='a' * 40)
+            commands = []
+
+            def run(argv, **kwargs):
+                commands.append(argv)
+                if argv[0] == 'ssh-keygen':
+                    argv[-1].write_text('fixture private key')
+                    argv[-1].with_suffix('.pub').write_text('fixture public key')
+                return SimpleNamespace(stdout='STOPPED')
+
+            def path(value):
+                return run_dir if value == '/run' else Path(value)
+
+            argv = ['lxc_smoke.py', '--site', str(root / 'site.json'), str(candidate), str(evidence), '--id-base', '1000000']
+            with (patch.object(lxc_smoke, 'Path', path), patch.object(lxc_smoke, 'load_site', return_value=site),
+                  patch.object(lxc_smoke, 'protected'), patch.object(lxc_smoke, 'require_runner_context'),
+                  patch.object(lxc_smoke, 'unused_id_range'), patch.object(lxc_smoke, 'extract'),
+                  patch.object(lxc_smoke, 'run', side_effect=run), patch.object(lxc_smoke.shutil, 'which', return_value=None),
+                  patch.object(lxc_smoke, 'os', wraps=os) as local_os, patch.object(common.fcntl, 'flock'),
+                  patch.object(lxc_smoke.subprocess, 'Popen') as popen,
+                  patch.object(common, 'wait_for', side_effect=RuntimeError('Guest failed at boot')),
+                  patch.object(sys, 'argv', argv), patch.object(sys, 'platform', 'linux')):
+                local_os.environ = {'GOLDEN_APPLY': 'smoke'}
+                local_os.geteuid.return_value = 0
+                local_os.readlink.side_effect = ['private', 'host']
+                local_os.umask.return_value = 0
+                local_os.fstat.return_value = SimpleNamespace(st_uid=0, st_mode=0o100600)
+                local_os.open.return_value = 42
+                popen.return_value.poll.return_value = 1
+                with self.assertRaisesRegex(RuntimeError, 'Guest failed at boot'):
+                    lxc_smoke.main()
+
+            runtime = evidence / 'lxc'
+            name = next(runtime.iterdir()).name
+            alias = run_dir / name
+            start = popen.call_args.args[0]
+            self.assertEqual(start[1:5], ['-P', str(alias), '-n', name])
+            self.assertEqual(start[start.index('-f') + 1], alias / name / 'config')
+            self.assertIn(f'lxc.rootfs.path = dir:{alias / name / "rootfs"}\n', (runtime / name / 'config').read_text())
+            self.assertEqual(evidence.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(runtime.stat().st_mode & 0o777, 0o711)
+            self.assertLess(commands.index(['mount', '--make-rprivate', '/']), commands.index(['mount', '--bind', runtime, alias]))
+            self.assertEqual(commands[-3:], [['lxc-stop', *start[1:5], '-t', '20'],
+                                             ['lxc-info', *start[1:5], '-sH'], ['umount', alias]])
+            self.assertFalse(alias.exists())
+            self.assertFalse((evidence / 'admin-key').exists())
+            self.assertTrue(json.loads((evidence / 'smoke-report.json').read_text())['container_stopped'])
+
+
 class NativeArchiveTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
