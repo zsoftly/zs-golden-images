@@ -134,6 +134,8 @@ else
       targets:{lxc:{config:[{type:"all",after:4,content:"lxc.include = LXC_TEMPLATE_CONFIG/common.conf\nlxc.arch = x86_64"},{type:"user",after:4,content:"lxc.include = LXC_TEMPLATE_CONFIG/userns.conf"}]}}}' > "$run/lxc.json"
   "${common_env[@]}" "$distrobuilder" build-dir "$run/lxc.json" "$run/rootfs" --cache-dir "$run/cache"
   "${common_env[@]}" unshare --mount --propagation private --fork "$repo/scripts/configure-lxc-rootfs.sh" "$profile" "$run/rootfs" "$run/metadata.json"
+  # The build directory is private, but this directory becomes / in the guest.
+  chmod 0755 -- "$run/rootfs"
   jq -f "$repo/builders/distrobuilder/pack.jq" "$run/lxc.json" > "$run/lxc-pack.json"
   "${common_env[@]}" "$distrobuilder" pack-lxc "$run/lxc-pack.json" "$run/rootfs" "$run/output" --compression xz --cache-dir "$run/cache"
   artifact="$run/output/rootfs.tar.xz"

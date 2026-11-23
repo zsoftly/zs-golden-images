@@ -59,7 +59,10 @@ class ReleaseTests(unittest.TestCase):
         path.write_text(json.dumps(value))
 
     def archive(self, extra=None, omit=()):
-        contents = {"etc/os-release": b"ID=debian\nVERSION_ID=13\n", "etc/machine-id": b"",
+        root = tarfile.TarInfo(".")
+        root.type = tarfile.DIRTYPE
+        root.mode = 0o755
+        contents = {".": root, "etc/os-release": b"ID=debian\nVERSION_ID=13\n", "etc/machine-id": b"",
                     "etc/golden-image.json": b"{}", "etc/resolv.conf": b""}
         contents.update(extra or {})
         for name in omit:
@@ -202,6 +205,19 @@ class ReleaseTests(unittest.TestCase):
     def test_identity_left_in_archive(self):
         self.archive({"etc/machine-id": b"old-identity"})
         with self.assertRaisesRegex(ValueError, "machine ID"):
+            release.inspect_artifact(self.artifact, "proxmox-lxc")
+
+    def test_lxc_archive_root_must_allow_guest_user_traversal(self):
+        root = tarfile.TarInfo(".")
+        root.type = tarfile.DIRTYPE
+        root.mode = 0o700
+        self.archive({".": root})
+        with self.assertRaisesRegex(ValueError, "root-owned mode 0755"):
+            release.inspect_artifact(self.artifact, "proxmox-lxc")
+
+    def test_lxc_archive_requires_explicit_root_permissions(self):
+        self.archive(omit=(".",))
+        with self.assertRaisesRegex(ValueError, "root directory entry"):
             release.inspect_artifact(self.artifact, "proxmox-lxc")
 
     def test_inherited_resolver_content_is_rejected(self):
