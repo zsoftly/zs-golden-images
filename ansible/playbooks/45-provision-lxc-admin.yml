@@ -87,7 +87,8 @@
       failed_when: golden_admin_connection.rc != 0 or golden_admin_connection.stdout_lines != ['0', golden_admin_candidate_identity.content | b64decode | trim]
       no_log: true
     - name: Disable temporary root SSH only after recovery proof
-      ansible.builtin.shell: |
+      # This command disables its own login, so Ansible must not upload a module that requires cleanup over SSH.
+      ansible.builtin.raw: |
         set -eu
         config=/etc/ssh/sshd_config.d/00-golden-images.conf
         test -f "$config" && test ! -L "$config" || exit 1
