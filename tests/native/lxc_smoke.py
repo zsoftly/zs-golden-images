@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 
 import common as vm
@@ -95,6 +96,21 @@ def extract(artifact, rootfs, base):
                 os.chown(entry, base + (item.uid if item else 0), base + (item.gid if item else 0), follow_symlinks=False)
                 if not entry.is_symlink():
                     os.chmod(entry, (item.mode & 0o7777) if item else 0o755)
+
+
+def seed_hostname(rootfs, hostname, id_base):
+    etc = rootfs / 'etc'
+    require(etc.is_dir() and not etc.is_symlink(), 'Clone must have a real /etc directory')
+    with tempfile.NamedTemporaryFile(mode='w', dir=etc, prefix='.golden-hostname-', delete=False) as output:
+        staged = Path(output.name)
+        try:
+            os.fchown(output.fileno(), id_base, id_base)
+            os.fchmod(output.fileno(), 0o644)
+            output.write(hostname + '\n')
+            output.flush()
+            staged.replace(etc / 'hostname')
+        finally:
+            staged.unlink(missing_ok=True)
 
 
 def main():
@@ -197,6 +213,7 @@ def main():
                                         '-o', evidence / (logname + '.lxc'), '-l', 'INFO'], stdout=output, stderr=subprocess.STDOUT,
                                        preexec_fn=vm.child_guard(os.getpid()))
         current = vm.wait_for(process, identity)
+        require(current['hostname'] == name, 'Container did not apply its provisioned hostname')
         pid = container_pid()
         for kind in ('uid_map', 'gid_map'):
             mapping = [list(map(int, line.split())) for line in Path(f'/proc/{pid}/{kind}').read_text().splitlines()]
@@ -216,6 +233,7 @@ def main():
         runtime.chmod(0o711)
         instance.chmod(0o711)
         extract(artifact, rootfs, args.id_base)
+        seed_hostname(rootfs, name, args.id_base)
         config = '\n'.join([
             'lxc.include = /usr/share/lxc/config/common.conf', 'lxc.include = /usr/share/lxc/config/userns.conf',
             'lxc.arch = x86_64', 'lxc.rootfs.path = dir:' + str(visible_instance / 'rootfs'), 'lxc.uts.name = ' + name,
