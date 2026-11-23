@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate, sign and publish approved artifacts using GnuPG and the AWS CLI."""
+"""Validate, sign and publish approved artifacts."""
 
 import argparse
 import base64
@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 
 REPO = Path(__file__).resolve().parents[1]
 PROFILES = {"debian-13", "ubuntu-26.04"}
-TARGETS = {"cloudstack-kvm": ".qcow2", "proxmox-lxc": ".tar.xz"}
+TARGETS = {"cloudstack-kvm": ".qcow2", "proxmox-kvm": ".qcow2", "proxmox-lxc": ".tar.xz"}
 COMMON_CHECKS = {
     "boot", "clone_identity", "network", "dns", "time", "ansible_idempotency",
     "patching", "reboot", "workload", "rollback", "secret_scan",
@@ -25,9 +25,12 @@ COMMON_CHECKS = {
 }
 TARGET_CHECKS = {
     "cloudstack-kvm": {"cloud_init", "guest_agent", "cloudstack_compatibility"},
+    "proxmox-kvm": {"cloud_init", "guest_agent", "proxmox_compatibility"},
     "proxmox-lxc": {"unprivileged_lxc", "container_provisioning", "proxmox_compatibility"},
 }
 MAX_OBJECT = 5_000_000_000
+GITHUB_REPOSITORY = "zsoftly/zs-golden-images"
+GITHUB_MAX_ASSET = 2 * 1024**3
 
 
 def require(condition, message):
@@ -91,8 +94,9 @@ def candidate(path):
     require(data.get("profile") in PROFILES and data.get("target") in TARGETS,
             "Unsupported profile or target")
     require(isinstance(data.get("version"), str) and
-            re.fullmatch(r"[0-9]{8}(?:-[a-z0-9][a-z0-9.-]{0,31})?", data["version"]),
-            "Version must be YYYYMMDD or YYYYMMDD-revision")
+            re.fullmatch(r"[0-9]{8}(?:-[a-z0-9][a-z0-9.-]{0,31})?", data["version"]) and
+            ".." not in data["version"] and not data["version"].endswith((".", ".lock")),
+            "Version must be a tag-safe YYYYMMDD or YYYYMMDD-revision")
     datetime.datetime.strptime(data["version"][:8], "%Y%m%d")
     require(bool(re.fullmatch(r"[0-9a-f]{40}", data.get("source_commit", ""))),
             "Missing source commit")
@@ -105,7 +109,7 @@ def candidate(path):
 
 
 def inspect_artifact(path, target):
-    if target == "cloudstack-kvm":
+    if TARGETS[target] == ".qcow2":
         info = json.loads(run(["qemu-img", "info", "--output=json", "-f", "qcow2", path]))
         require(info.get("format") == "qcow2" and info.get("virtual-size", 0) > 0,
                 "Not a QCOW2 disk")
@@ -144,6 +148,52 @@ def inspect_artifact(path, target):
                         "Image contains an access or enrollment identity")
         require("." in seen, "LXC archive lacks its root directory entry")
         require(not required and os_release, "Archive lacks required OS/image identity files")
+
+
+def cis_benchmark(profile):
+    version = load(REPO / "audit/pins.json")["profiles"][profile]["benchmark_version"]
+    return {"family": "CIS", "profile": profile, "version": version, "level": 1, "system_type": "Server"}
+
+
+def verify_cis_coverage(data, checks, reports):
+    coverage = checks["cis_coverage"]["evidence"]
+    require(len(coverage) == 1, "Supply one reviewed CIS coverage report")
+    report_hash = coverage[0]
+    report = reports[report_hash]
+    require(isinstance(report, dict) and report.get("coverage") == "complete" and
+            report.get("raw_provenance") == "verified" and report.get("promotion_allowed") is True,
+            "CIS coverage evidence must be JSON with complete, verified coverage and promotion allowed")
+    benchmark = cis_benchmark(data["profile"])
+    require(report.get("benchmark") == benchmark and
+            type(report["benchmark"]["level"]) is int and
+            report.get("target") == data["target"] and report.get("artifact_sha256") == data["artifact"]["sha256"],
+            "CIS Level 1 report must match the pinned benchmark, target and image digest")
+    inventory_hash = report.get("control_inventory_sha256")
+    inventory = reports.get(inventory_hash)
+    require(inventory_hash != report_hash and isinstance(inventory, dict) and
+            inventory.get("benchmark") == benchmark, "Missing reviewed CIS Level 1 control inventory")
+    controls = inventory.get("control_ids")
+    require(isinstance(controls, list) and controls and
+            all(isinstance(item, str) and item.strip() == item and item for item in controls) and
+            len(set(controls)) == len(controls), "Invalid CIS control inventory")
+    results = report.get("controls")
+    require(isinstance(results, dict) and set(results) == set(controls),
+            "CIS coverage report must assess every reviewed control")
+    for control_id, result in results.items():
+        require(isinstance(result, dict), f"Invalid CIS result: {control_id}")
+        status = result.get("status")
+        require(status in {"passed", "not_applicable", "host_inherited"},
+                f"CIS control must pass or have an assessed disposition: {control_id}")
+        if status == "host_inherited":
+            require(data["target"] == "proxmox-lxc", f"Host inheritance is limited to LXC: {control_id}")
+        proof = result.get("evidence_sha256")
+        require(proof in reports and proof not in {report_hash, inventory_hash},
+                f"CIS control is missing bound supporting evidence: {control_id}")
+        if status != "passed":
+            require(isinstance(result.get("rationale"), str) and result["rationale"].strip(),
+                    f"CIS disposition requires a rationale: {control_id}")
+    require(any(result["status"] == "passed" for result in results.values()),
+            "CIS assessment has no passing guest controls")
 
 
 def approval(candidate_path, approval_path, signature, reviewer, home):
@@ -191,11 +241,7 @@ def approval(candidate_path, approval_path, signature, reviewer, home):
         require(result.get("status") == "passed" and isinstance(result.get("evidence"), list)
                 and result["evidence"] and set(result["evidence"]) <= hashes,
                 f"Acceptance check has no passing bound evidence: {name}")
-    for evidence_hash in checks["cis_coverage"]["evidence"]:
-        report = reports[evidence_hash]
-        require(isinstance(report, dict) and report.get("coverage") == "complete" and
-                report.get("raw_provenance") == "verified" and report.get("promotion_allowed") is True,
-                "CIS coverage evidence must be JSON with complete, verified coverage and promotion allowed")
+    verify_cis_coverage(data, checks, reports)
     scan = accepted.get("vulnerability_scan", {})
     require(isinstance(scan.get("tool"), str) and scan["tool"] and
             isinstance(scan.get("version"), str) and scan["version"] and
@@ -231,6 +277,7 @@ def prepare(args):
     require(digest(output / name) == data["artifact"]["sha256"], "Artifact changed while copying")
     metadata = {key: data[key] for key in ("schema_version", "profile", "target", "version", "source_commit")}
     metadata.update(artifact={"path": name, "sha256": digest(output / name)},
+                    cis_level_1=cis_benchmark(data["profile"]),
                     candidate_sha256=digest(args.candidate), approval_sha256=digest(args.approval),
                     evidence_sha256=sorted(item["sha256"] for item in accepted["evidence"]),
                     reviewer_fingerprint=fingerprint(args.reviewer),
@@ -315,6 +362,112 @@ def publish(args):
     print(f"[OK] Published version {data['version']}; consumers must verify SHA256SUMS.asc before use")
 
 
+def github_api(endpoint, *flags):
+    return json.loads(run(["gh", "api", "--hostname", "github.com", *flags,
+                           f"repos/{GITHUB_REPOSITORY}/{endpoint}"]))
+
+
+def github_list(endpoint):
+    return [item for page in github_api(endpoint, "--paginate", "--slurp") for item in page]
+
+
+def github_release_assets(release_id, expected, complete=False):
+    actual = {}
+    for asset in github_list(f"releases/{release_id}/assets"):
+        name = asset["name"]
+        require(name in expected and name not in actual, "Unexpected GitHub release asset")
+        size, checksum = expected[name]
+        require(not (asset["state"] == "starter" and asset["size"] == 0),
+                f"GitHub left an empty upload placeholder for {name}. Remove it from the draft before retrying.")
+        require(asset["state"] == "uploaded" and asset["size"] == size and
+                asset.get("digest") == f"sha256:{checksum}",
+                f"GitHub asset size or digest mismatch: {name}")
+        actual[name] = asset
+    require(not complete or actual.keys() == expected.keys(), "GitHub release is missing verified assets")
+    return actual
+
+
+def github_tag(tag, commit, published=False):
+    refs = github_api(f"git/matching-refs/tags/{tag}")
+    exact = [ref["object"] for ref in refs if ref["ref"] == f"refs/tags/{tag}"]
+    require(len(exact) == 1 if published else len(exact) <= 1, "Unexpected GitHub tag state")
+    require(all(ref["type"] == "commit" and ref["sha"] == commit for ref in exact),
+            "GitHub tag points to a different source commit")
+    return bool(exact)
+
+
+def publish_github(args):
+    require(os.environ.get("GOLDEN_APPLY") == "publish", "Set GOLDEN_APPLY=publish only after release approval")
+    directory = Path(args.directory).resolve()
+    require("#" not in str(directory), "GitHub release directory must not contain a label separator (#)")
+    data = verify_release(directory, args.signer, args.gpg_home)
+    require(data.get("cis_level_1") == cis_benchmark(data["profile"]),
+            "Prepare a release with verified CIS Level 1 evidence before GitHub publication")
+    tag = f"zs-{data['profile']}-{data['target']}-{data['version']}"
+    run(["git", "check-ref-format", f"refs/tags/{tag}"])
+    commit = data["source_commit"]
+    files = (data["artifact"]["path"], "release.json", "SHA256SUMS", "SHA256SUMS.asc")
+    expected = {}
+    for name in files:
+        path = regular(directory / name)
+        size = path.stat().st_size
+        require(size < GITHUB_MAX_ASSET, f"GitHub release asset must be smaller than 2 GiB: {name}")
+        expected[name] = (size, digest(path))
+    require(verify_release(directory, args.signer, args.gpg_home) == data, "Release changed during verification")
+
+    require(github_api(f"commits/{commit}")["sha"] == commit, "Signed source commit is absent from GitHub")
+    releases = [item for item in github_list("releases") if item["tag_name"] == tag]
+    require(len(releases) <= 1, "More than one GitHub release uses this tag")
+    tag_exists = github_tag(tag, commit)
+    if not releases:
+        require(not args.publish_draft, "Stage and verify a complete draft before publishing")
+        require(not tag_exists, "A GitHub tag already exists for this version")
+        release = github_api("releases", "-X", "POST", "-f", f"tag_name={tag}",
+                             "-f", f"target_commitish={commit}", "-f", f"name={tag}",
+                             "-f", "body=Verify the signed SHA256SUMS before importing the image.",
+                             "-F", "draft=true", "-f", "make_latest=false")
+    else:
+        release = releases[0]
+    require(release["tag_name"] == tag and release["target_commitish"] == commit,
+            "Existing GitHub release conflicts with the signed draft")
+    release_id = release["id"]
+    require(type(release_id) is int and release_id > 0, "Invalid GitHub release identity")
+    if release["draft"] is False:
+        require(args.publish_draft, "This GitHub release is already public")
+        require(release.get("immutable") is True, "Existing GitHub release is mutable")
+        github_tag(tag, commit, published=True)
+        github_release_assets(release_id, expected, complete=True)
+        print(f"[OK] Verified existing public release https://github.com/{GITHUB_REPOSITORY}/releases/tag/{tag}")
+        return
+    require(release["draft"] is True, "Unexpected GitHub draft state")
+
+    if not args.publish_draft:
+        actual = github_release_assets(release_id, expected)
+        for name in files:
+            if name in actual:
+                continue
+            path = regular(directory / name)
+            require((path.stat().st_size, digest(path)) == expected[name], "Release changed before upload")
+            run(["gh", "release", "upload", tag, path, "--repo", f"github.com/{GITHUB_REPOSITORY}"])
+        github_release_assets(release_id, expected, complete=True)
+        print(f"[OK] Verified draft release {tag}")
+        return
+
+    try:
+        settings = github_api("immutable-releases")
+    except subprocess.CalledProcessError as error:
+        raise ValueError("Cannot verify GitHub immutable releases. Check the repository setting and admin read access.") from error
+    require(settings.get("enabled") is True, "Enable GitHub immutable releases before publishing")
+    github_tag(tag, commit)
+    github_release_assets(release_id, expected, complete=True)
+    published = github_api(f"releases/{release_id}", "-X", "PATCH", "-F", "draft=false", "-f", "make_latest=false")
+    require(published["id"] == release_id and published["tag_name"] == tag and published["draft"] is False and
+            published.get("immutable") is True, "GitHub did not confirm immutable publication")
+    github_tag(tag, commit, published=True)
+    github_release_assets(release_id, expected, complete=True)
+    print(f"[OK] Published https://github.com/{GITHUB_REPOSITORY}/releases/tag/{tag}")
+
+
 def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
@@ -331,12 +484,14 @@ def main():
     prep.add_argument("output")
     verify = commands.add_parser("verify", help="Verify a release before import, including rollback versions")
     pub = commands.add_parser("publish", help="Conditionally publish a signed version; never modify platform templates")
-    for cmd in (verify, pub):
+    github = commands.add_parser("publish-github", help="Stage or publish a signed GitHub release")
+    github.add_argument("--publish-draft", action="store_true", help="Publish a previously staged and verified draft")
+    for cmd in (verify, pub, github):
         cmd.add_argument("directory")
     pub.add_argument("destination")
-    for cmd in (prep, verify, pub):
+    for cmd in (prep, verify, pub, github):
         cmd.add_argument("--signer", required=True)
-    for cmd in (check, prep, verify, pub):
+    for cmd in (check, prep, verify, pub, github):
         cmd.add_argument("--gpg-home", required=True)
     args = parser.parse_args()
     if args.command == "inspect":
@@ -351,6 +506,8 @@ def main():
     elif args.command == "verify":
         verify_release(args.directory, args.signer, args.gpg_home)
         print("[OK] Release signature and checksums verified")
+    elif args.command == "publish-github":
+        publish_github(args)
     else:
         publish(args)
 

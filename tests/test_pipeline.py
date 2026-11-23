@@ -38,9 +38,9 @@ class PipelineInputs(unittest.TestCase):
             env=env, text=True, capture_output=True, check=False,
         )
 
-    def test_all_four_profiles_and_targets_validate_without_builder(self):
+    def test_all_profiles_and_targets_validate_without_builder(self):
         for profile in ("debian-13", "ubuntu-26.04"):
-            for target in ("cloudstack-kvm", "proxmox-lxc"):
+            for target in ("cloudstack-kvm", "proxmox-kvm", "proxmox-lxc"):
                 with self.subTest(profile=profile, target=target):
                     data = copy.deepcopy(self.data)
                     if profile == "ubuntu-26.04":
@@ -59,6 +59,11 @@ class PipelineInputs(unittest.TestCase):
     def test_unknown_profile_and_target_fail(self):
         self.assertNotEqual(self.run_pipeline(profile="debian-12").returncode, 0)
         self.assertNotEqual(self.run_pipeline(target="production").returncode, 0)
+
+    def test_versions_must_be_usable_in_release_tags(self):
+        for version in ("20261115-r..1", "20261115-r1.", "20261115-r1.lock", "20261115-r1\n", "20261115-r1.lock\n"):
+            with self.subTest(version=version):
+                self.assertNotEqual(self.run_pipeline(self.data | {"version": version}).returncode, 0)
 
     def test_missing_hash_extra_fields_and_moving_snapshot_fail(self):
         changes = [

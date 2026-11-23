@@ -6,7 +6,7 @@ repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 phase=$1 profile=$2 target=$3 rootfs=$4 metadata=$5
 [[ "$phase" == configure || "$phase" == harden || "$phase" == cleanup ]] || fail 'Unsupported phase.'
 [[ "$profile" == debian-13 || "$profile" == ubuntu-26.04 ]] || fail 'Unsupported profile.'
-[[ "$target" == cloudstack-kvm || "$target" == proxmox-lxc ]] || fail 'Unsupported target.'
+[[ "$target" == cloudstack-kvm || "$target" == proxmox-kvm || "$target" == proxmox-lxc ]] || fail 'Unsupported target.'
 [[ ${GOLDEN_APPLY:-} == build && $(uname -s) == Linux && $EUID == 0 ]] || fail 'Requires an explicitly authorized Linux builder as root.'
 [[ ! -e /etc/pve && -f /etc/zs-golden-images/builder.json && ! -L /etc/zs-golden-images/builder.json ]] || fail 'Missing dedicated-builder marker or Proxmox host detected.'
 [[ $(stat -c '%u:%a' /etc/zs-golden-images/builder.json) == 0:600 ]] || fail 'Builder marker must be root-owned mode 0600.'
@@ -18,6 +18,7 @@ workspace=$(cd -- "$workspace" && pwd -P)
 rootfs=$(cd -- "$rootfs" && pwd -P)
 [[ "$rootfs" == "$workspace/"* && "$rootfs" != "$workspace" && -f "$rootfs/etc/os-release" && -x "$rootfs/usr/bin/python3" ]] || fail 'Root filesystem must be beneath the dedicated workspace and contain Python.'
 [[ "$metadata" == /* && -f "$metadata" ]] || fail 'Supply an absolute source metadata file.'
+jq -e --arg profile "$profile" --arg target "$target" '.profile == $profile and .target == $target' "$metadata" >/dev/null || fail 'Build metadata profile or target differs from the request.'
 jq -e '.source_commit | test("^[0-9a-f]{40}$")' "$metadata" >/dev/null || fail 'Invalid source commit.'
 jq -e '.source_image_sha256 | test("^[0-9a-f]{64}$")' "$metadata" >/dev/null || fail 'Invalid source manifest digest.'
 jq -e '.source_kind == "apt-snapshot" and (.source_image_url | startswith("https://")) and (.image_version | test("^[0-9]{8}(-[a-z0-9][a-z0-9.-]*)?$"))' "$metadata" >/dev/null || fail 'Invalid pinned source metadata.'

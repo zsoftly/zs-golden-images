@@ -56,7 +56,7 @@ def arguments(argv):
     require(len(argv) == 3, 'Expected exactly stage, profile and target')
     stage, profile, target = argv
     require(stage in STAGES, 'Unknown candidate stage')
-    require(profile in PROFILES and target in ('cloudstack-kvm', 'proxmox-lxc'), 'Unknown image profile or target')
+    require(profile in PROFILES and target in ('cloudstack-kvm', 'proxmox-kvm', 'proxmox-lxc'), 'Unknown image profile or target')
     return stage, profile, target
 
 
@@ -64,7 +64,9 @@ def approved_request(record, request, now):
     profile, target = request
     require(set(record) == {'profile', 'target', 'version', 'source_commit', 'site_path', 'expires_at'}, 'Unexpected approval fields')
     require((record['profile'], record['target']) == (profile, target), 'Request differs from operator approval')
-    require(isinstance(record['version'], str) and re.fullmatch(r'[0-9]{8}(-[a-z0-9][a-z0-9.-]{0,39})?', record['version']), 'Invalid approved version')
+    version = record['version']
+    require(isinstance(version, str) and re.fullmatch(r'[0-9]{8}(-[a-z0-9][a-z0-9.-]{0,31})?', version)
+            and '..' not in version and not version.endswith(('.', '.lock')), 'Invalid approved version')
     require(isinstance(record['source_commit'], str) and re.fullmatch(r'[0-9a-f]{40}', record['source_commit']), 'Invalid approved source commit')
     require(type(record['expires_at']) is int and now < record['expires_at'], 'Operator approval expired')
     require(isinstance(record['site_path'], str) and record['site_path'].startswith('/'), 'Invalid approved site path')
@@ -282,7 +284,7 @@ def build_stage(project, state, evidence, name, guard, approval, sources, candid
 def smoke_stage(project, evidence, name, guard, binding, approval, candidate, bound, native, settings, native_module):
     reports = []
     target = approval['target']
-    for number in ((1,) if target == 'cloudstack-kvm' else (1, 2)):
+    for number in ((1,) if target != 'proxmox-lxc' else (1, 2)):
         unit = 'zs-golden-smoke-' + name + '-' + str(number) + '.service'
         output = native.evidence / (name + '-smoke-' + str(number))
         context = evidence / ('native-context-' + str(number) + '.json')
@@ -290,7 +292,7 @@ def smoke_stage(project, evidence, name, guard, binding, approval, candidate, bo
                            'source_commit': approval['source_commit'], 'site_path': settings['native_site'],
                            'site_sha256': digest(Path(settings['native_site'])), 'unit': unit,
                            'guard_unit': guard, 'operation_binding': binding})
-        helper = project / 'tests/native' / ('vm_smoke.py' if target == 'cloudstack-kvm' else 'lxc_smoke.py')
+        helper = project / 'tests/native' / ('vm_smoke.py' if target != 'proxmox-lxc' else 'lxc_smoke.py')
         argv = ['/usr/bin/unshare', '--mount', '--propagation', 'private', '--fork',
                 PREFIX / 'venv/bin/python', helper, '--site', settings['native_site'], '--ci-context', context, candidate, output]
         if target == 'proxmox-lxc':
@@ -304,7 +306,7 @@ def smoke_stage(project, evidence, name, guard, binding, approval, candidate, bo
         require(report.get('status') == 'passed' and report.get('original_artifact_unchanged') is True and
                 report.get('candidate_sha256') == bound['candidate_sha256'] and report.get('artifact_sha256') == bound['artifact_sha256'] and
                 report.get('test_source_commit') == approval['source_commit'], 'Native report binding or result mismatch')
-        if target == 'cloudstack-kvm':
+        if target != 'proxmox-lxc':
             require(report.get('scope') == 'native-kvm-smoke-only' and report.get('clone_uniqueness') == 'passed' and
                     len(report.get('clones', [])) == 2 and report['clones'][0].get('reboot_persistence') == 'passed', 'Incomplete two-clone KVM smoke')
         else:

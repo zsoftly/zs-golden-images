@@ -4,10 +4,10 @@
     src: /etc/resolv.conf
   register: golden_build_resolver
   no_log: true
-  when: golden_target == 'cloudstack-kvm'
+  when: golden_target != 'proxmox-lxc'
 - name: Install shared image packages without starting services
   ansible.builtin.apt:
-    name: "{{ ['ca-certificates', 'openssh-server', 'python3', 'sudo', 'iproute2', 'iputils-ping', 'rsyslog', 'libpam-pwquality'] + (['cloud-init', 'cloud-guest-utils', 'e2fsprogs', 'qemu-guest-agent', 'chrony', 'netplan.io', 'systemd-resolved'] if golden_target == 'cloudstack-kvm' else []) }}"
+    name: "{{ ['ca-certificates', 'openssh-server', 'python3', 'sudo', 'iproute2', 'iputils-ping', 'rsyslog', 'libpam-pwquality'] + (['cloud-init', 'cloud-guest-utils', 'e2fsprogs', 'qemu-guest-agent', 'chrony', 'netplan.io', 'systemd-resolved'] if golden_target != 'proxmox-lxc' else []) }}"
     state: present
     update_cache: true
     install_recommends: false
@@ -22,7 +22,7 @@
     mode: '0644'
     follow: false
   no_log: true
-  when: golden_target == 'cloudstack-kvm'
+  when: golden_target != 'proxmox-lxc'
 - name: Remove VM-only services from container roots
   ansible.builtin.apt:
     name:
@@ -40,14 +40,14 @@
     owner: root
     group: root
     mode: '0755'
-- name: Configure metadata sources for CloudStack
+- name: Configure the platform cloud-init datasource
   ansible.builtin.copy:
-    dest: /etc/cloud/cloud.cfg.d/90-zs-cloudstack.cfg
+    dest: "/etc/cloud/cloud.cfg.d/90-zs-{{ 'cloudstack' if golden_target == 'cloudstack-kvm' else 'proxmox' }}.cfg"
     owner: root
     group: root
     mode: '0644'
     content: |
-      datasource_list: [CloudStack, ConfigDrive, None]
+      datasource_list: [{{ 'CloudStack, ConfigDrive, None' if golden_target == 'cloudstack-kvm' else 'NoCloud, None' }}]
       disable_root: true
       ssh_pwauth: false
       ssh_deletekeys: true
@@ -55,7 +55,7 @@
         network:
           renderers: [netplan]
           activators: [netplan]
-  when: golden_target == 'cloudstack-kvm'
+  when: golden_target != 'proxmox-lxc'
 - name: Enable services for the next guest boot only
   ansible.builtin.command:
     argv:
@@ -63,7 +63,7 @@
       - enable
       - --no-reload
       - "{{ item }}"
-  loop: "{{ ['ssh', 'rsyslog'] + (['chrony', 'systemd-networkd', 'systemd-resolved'] if golden_target == 'cloudstack-kvm' else []) }}"
+  loop: "{{ ['ssh', 'rsyslog'] + (['chrony', 'systemd-networkd', 'systemd-resolved'] if golden_target != 'proxmox-lxc' else []) }}"
   register: golden_enable_service
   changed_when: "'Created symlink' in golden_enable_service.stderr"
 - name: Record source manifest provenance
@@ -88,15 +88,15 @@
     executable: /bin/sh
   register: golden_cloud_units
   changed_when: false
-  when: golden_target == 'cloudstack-kvm'
+  when: golden_target != 'proxmox-lxc'
 - name: Require packaged cloud-init units
   ansible.builtin.assert:
     that: golden_cloud_units.stdout_lines | length > 0
-  when: golden_target == 'cloudstack-kvm'
+  when: golden_target != 'proxmox-lxc'
 - name: Enable packaged cloud-init units for the next boot
   ansible.builtin.command:
     argv: [systemctl, enable, --no-reload, "{{ item }}"]
   loop: "{{ golden_cloud_units.stdout_lines | default([]) }}"
   register: golden_cloud_enable
   changed_when: "'Created symlink' in golden_cloud_enable.stderr"
-  when: golden_target == 'cloudstack-kvm'
+  when: golden_target != 'proxmox-lxc'

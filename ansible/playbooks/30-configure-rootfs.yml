@@ -12,7 +12,7 @@
           - ansible_connection == 'community.general.chroot'
           - golden_phase in ['configure', 'harden', 'cleanup']
           - golden_profile in ['debian-13', 'ubuntu-26.04']
-          - golden_target in ['cloudstack-kvm', 'proxmox-lxc']
+          - golden_target in ['cloudstack-kvm', 'proxmox-kvm', 'proxmox-lxc']
           - golden_source_commit is match('^[0-9a-f]{40}$')
           - golden_source_image_sha256 is match('^[0-9a-f]{64}$')
           - golden_source_kind == 'apt-snapshot'

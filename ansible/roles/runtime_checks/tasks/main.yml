@@ -16,12 +16,12 @@
   ansible.builtin.assert:
     that:
       - ansible_facts.services[item].state == 'running'
-  loop: "{{ ['ssh.service', 'rsyslog.service'] + (['qemu-guest-agent.service', 'chrony.service'] if golden_target == 'cloudstack-kvm' else []) }}"
+  loop: "{{ ['ssh.service', 'rsyslog.service'] + (['qemu-guest-agent.service', 'chrony.service'] if golden_target != 'proxmox-lxc' else []) }}"
 - name: Require completed cloud-init on VMs
   ansible.builtin.command: cloud-init status --wait
   timeout: 180
   changed_when: false
-  when: golden_target == 'cloudstack-kvm'
+  when: golden_target != 'proxmox-lxc'
 - name: Verify PAM password quality is active
   ansible.builtin.command: grep -E ^password.*pam_pwquality.so /etc/pam.d/common-password
   changed_when: false
@@ -36,7 +36,7 @@
   register: golden_sysctl
   changed_when: false
   failed_when: golden_sysctl.stdout != item.value
-  when: golden_target == 'cloudstack-kvm'
+  when: golden_target != 'proxmox-lxc'
 - name: Check public image has no Wazuh identity
   ansible.builtin.command: /bin/sh -ec 'test ! -s /var/ossec/etc/client.keys'
   changed_when: false

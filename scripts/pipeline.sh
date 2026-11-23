@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 fail() { printf '[FAIL] %s\n' "$*" >&2; exit 1; }
-[[ $# == 4 ]] || fail 'Usage: pipeline.sh validate|build debian-13|ubuntu-26.04 cloudstack-kvm|proxmox-lxc /absolute/site.json'
+[[ $# == 4 ]] || fail 'Usage: pipeline.sh validate|build debian-13|ubuntu-26.04 cloudstack-kvm|proxmox-kvm|proxmox-lxc /absolute/site.json'
 action=$1 profile=$2 target=$3 site=$4
 case "$action" in validate|build) ;; *) fail 'Unsupported action.' ;; esac
-case "$target" in cloudstack-kvm|proxmox-lxc) ;; *) fail 'Unsupported target.' ;; esac
+case "$target" in cloudstack-kvm|proxmox-kvm|proxmox-lxc) ;; *) fail 'Unsupported target.' ;; esac
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 for dependency in jq python3 git; do command -v "$dependency" >/dev/null || fail "Missing tool: $dependency"; done
 profile_json=$(jq -ce --arg p "$profile" '.[$p] // error("Unsupported profile")' "$repo/builders/profiles.json") || fail 'Unsupported profile.'
@@ -90,7 +90,7 @@ gpg --batch --homedir "$run/gnupg" --no-default-keyring --keyring "$archive_keyr
 [[ -s "$run/archive-keys.asc" ]] || fail 'Distribution archive keyring contains no exportable trusted keys.'
 components=$(jq -r '.components|join(",")' <<< "$profile_json")
 epoch=$(jq -r .source_date_epoch "$site")
-if [[ "$target" == cloudstack-kvm ]]; then
+if [[ "$target" != proxmox-lxc ]]; then
   # DIB invokes sudo -E in its host hooks; sudo-rs can ignore -E.
   sudo_binary=/usr/bin/sudo
   [[ ! -x /usr/bin/sudo.ws ]] || sudo_binary=/usr/bin/sudo.ws
@@ -105,7 +105,7 @@ if [[ "$target" == cloudstack-kvm ]]; then
     || fail 'diskimage-builder requires sudo -E to preserve its build environment.'
 fi
 common_env=(env -i "PATH=$PATH" PYTHONDONTWRITEBYTECODE=1 HOME=/root LANG=C.UTF-8 ANSIBLE_COLLECTIONS_PATH=/opt/zs-golden-images/collections "TMPDIR=$run/tmp" "TMP_DIR=$run/tmp" "SOURCE_DATE_EPOCH=$epoch" GOLDEN_APPLY=build)
-if [[ "$target" == cloudstack-kvm ]]; then
+if [[ "$target" != proxmox-lxc ]]; then
   dib=/opt/zs-golden-images/venv/bin/disk-image-create
   expected_version=$(jq -r .diskimage_builder.version "$repo/builders/pins.json")
   [[ $("$dib" --version) == "$expected_version" ]] || fail 'Unexpected diskimage-builder version.'
@@ -114,7 +114,7 @@ if [[ "$target" == cloudstack-kvm ]]; then
     "DIB_APT_SOURCES_CONF=$apt_sources" "DIB_DEBIAN_COMPONENTS=$components" DIB_UBUNTU_MIRROR_DISTS=updates,security \
     "DIB_DEBIAN_DEBOOTSTRAP_SCRIPT=/usr/share/debootstrap/scripts/$release" "DIB_DEBOOTSTRAP_EXTRA_ARGS=--include=ca-certificates --force-check-gpg --keyring=$archive_keyring" \
     "DIB_IMAGE_CACHE=$run/cache" DIB_APT_MINIMAL_CREATE_INTERFACES=0 DIB_DEBUG_TRACE=0 \
-    "ELEMENTS_PATH=$repo/builders/diskimage-builder/elements" "ZS_SOURCE=$repo" "ZS_PROFILE=$profile" "ZS_METADATA=$run/metadata.json" \
+    "ELEMENTS_PATH=$repo/builders/diskimage-builder/elements" "ZS_SOURCE=$repo" "ZS_PROFILE=$profile" "ZS_TARGET=$target" "ZS_METADATA=$run/metadata.json" \
     "$dib" -a amd64 -t qcow2 --no-tmpfs --image-size 16 -o "$run/output/$profile-$version" \
     "$(jq -r .dib_element <<< "$profile_json")" vm block-device-mbr zs-configure
   artifact="$run/output/$profile-$version.qcow2"

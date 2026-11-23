@@ -57,7 +57,7 @@
     owner: root
     group: root
     mode: '0644'
-  when: golden_target == 'cloudstack-kvm'
+  when: golden_target != 'proxmox-lxc'
 - name: Remove VM kernel settings from container images
   ansible.builtin.file:
     path: /etc/sysctl.d/60-zs-golden-images.conf
@@ -87,7 +87,7 @@
     owner: root
     group: root
     mode: '0644'
-    content: "{{ {'baseline': 'offline-l1-subset', 'cis_complete': false, 'acceptance_source': 'signed-release-metadata', 'target': golden_target, 'configured': ['ssh-key-only', 'password-quality', 'password-aging-defaults', 'root-password-lock', 'default-umask', 'account-file-permissions', 'core-dump-limit', 'password-history', 'sudo-session-logging', 'persistent-journal'] + (['vm-sysctl-baseline'] if golden_target == 'cloudstack-kvm' else []), 'requires_runtime_evidence': ['effective-ssh-policy', 'service-health', 'pam-enforcement', 'complete-benchmark-audit'], 'host_owned': (['kernel-modules', 'sysctl', 'time-synchronization', 'bootloader', 'disk-partitioning'] if golden_target == 'proxmox-lxc' else []), 'provisioning_exceptions': (['root-key-only-until-instance-admin-provisioned'] if golden_target == 'proxmox-lxc' else []), 'unimplemented': ['full-benchmark-control-mapping', 'filesystem-layout', 'firewall-policy', 'auditd-rules', 'bootloader-policy', 'account-lockout']} | to_nice_json }}\n"
+    content: "{{ {'baseline': 'offline-l1-subset', 'cis_complete': false, 'acceptance_source': 'signed-release-metadata', 'target': golden_target, 'configured': ['ssh-key-only', 'password-quality', 'password-aging-defaults', 'root-password-lock', 'default-umask', 'account-file-permissions', 'core-dump-limit', 'password-history', 'sudo-session-logging', 'persistent-journal'] + (['vm-sysctl-baseline'] if golden_target != 'proxmox-lxc' else []), 'requires_runtime_evidence': ['effective-ssh-policy', 'service-health', 'pam-enforcement', 'complete-benchmark-audit'], 'host_owned': (['kernel-modules', 'sysctl', 'time-synchronization', 'bootloader', 'disk-partitioning'] if golden_target == 'proxmox-lxc' else []), 'provisioning_exceptions': (['root-key-only-until-instance-admin-provisioned'] if golden_target == 'proxmox-lxc' else []), 'unimplemented': ['full-benchmark-control-mapping', 'filesystem-layout', 'firewall-policy', 'auditd-rules', 'bootloader-policy', 'account-lockout']} | to_nice_json }}\n"
 - name: Register password-history PAM policy
   ansible.builtin.copy:
     dest: /usr/share/pam-configs/zs-pwhistory
@@ -169,4 +169,4 @@
       blacklist hfsplus
       install jffs2 /bin/false
       blacklist jffs2
-  when: golden_target == 'cloudstack-kvm'
+  when: golden_target != 'proxmox-lxc'

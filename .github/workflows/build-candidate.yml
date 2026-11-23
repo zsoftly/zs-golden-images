@@ -12,7 +12,7 @@ on:
         description: Image target
         required: true
         type: choice
-        options: [cloudstack-kvm, proxmox-lxc]
+        options: [cloudstack-kvm, proxmox-kvm, proxmox-lxc]
 
 permissions:
   contents: read
