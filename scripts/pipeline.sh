@@ -137,7 +137,8 @@ else
   # The build directory is private, but this directory becomes / in the guest.
   chmod 0755 -- "$run/rootfs"
   jq -f "$repo/builders/distrobuilder/pack.jq" "$run/lxc.json" > "$run/lxc-pack.json"
-  "${common_env[@]}" "$distrobuilder" pack-lxc "$run/lxc-pack.json" "$run/rootfs" "$run/output" --compression xz --cache-dir "$run/cache"
+  # Copy mode preserves the guest root permissions under the builder's private umask.
+  "${common_env[@]}" "$distrobuilder" pack-lxc "$run/lxc-pack.json" "$run/rootfs" "$run/output" --compression xz --cache-dir "$run/cache" --disable-overlay
   artifact="$run/output/rootfs.tar.xz"
   tar -tJf "$artifact" > "$run/archive-members.txt"
 fi
