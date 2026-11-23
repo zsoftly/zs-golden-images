@@ -87,14 +87,27 @@
       failed_when: golden_admin_connection.rc != 0 or golden_admin_connection.stdout_lines != ['0', golden_admin_candidate_identity.content | b64decode | trim]
       no_log: true
     - name: Disable temporary root SSH only after recovery proof
-      ansible.builtin.lineinfile:
-        path: /etc/ssh/sshd_config.d/00-golden-images.conf
-        regexp: ^PermitRootLogin
-        line: PermitRootLogin no
-    - name: Validate the final SSH configuration
-      ansible.builtin.command: /usr/sbin/sshd -t
-      changed_when: false
-    - name: Reload SSH with verified administrator access
-      ansible.builtin.systemd_service:
-        name: ssh
-        state: reloaded
+      ansible.builtin.shell: |
+        set -eu
+        config=/etc/ssh/sshd_config.d/00-golden-images.conf
+        test -f "$config" && test ! -L "$config" || exit 1
+        stage=$(mktemp -d /etc/ssh/.golden-root-cutover.XXXXXX)
+        trap 'rm -f -- "$stage/prior" "$stage/proposed"; rmdir -- "$stage"' EXIT
+        cp -p -- "$config" "$stage/prior"
+        cp -p -- "$config" "$stage/proposed"
+        awk 'tolower($1) == "permitrootlogin" { $0 = "PermitRootLogin no" } { print }' "$stage/prior" > "$stage/proposed"
+        grep -qx 'PermitRootLogin no' "$stage/proposed"
+        if cmp -s "$stage/prior" "$stage/proposed"; then
+          exit 0
+        fi
+        # Keep validation and reload on the same SSH session as the change.
+        mv -- "$stage/proposed" "$config"
+        if /usr/sbin/sshd -t && /usr/bin/systemctl reload ssh.service; then
+          printf '%s\n' changed
+        else
+          mv -- "$stage/prior" "$config"
+          /usr/sbin/sshd -t && /usr/bin/systemctl reload ssh.service
+          exit 1
+        fi
+      register: golden_root_cutover
+      changed_when: "'changed' in golden_root_cutover.stdout_lines"
