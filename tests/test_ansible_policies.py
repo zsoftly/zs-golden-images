@@ -461,6 +461,32 @@ class ImagePolicyTests(unittest.TestCase):
         self.assertIn('golden_admin_candidate_identity.content | b64decode | trim', check['failed_when'])
         self.assertTrue(check['no_log'])
 
+    def test_lxc_root_cutover_preserves_recovery_if_reload_fails(self):
+        play = yaml.safe_load((ROOT / 'ansible/playbooks/45-provision-lxc-admin.yml').read_text())[0]
+        cutover = next(item for item in play['tasks'] if item['name'].startswith('Disable temporary root SSH'))
+        for allow_reload in (True, False):
+            with self.subTest(allow_reload=allow_reload), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                config = root / 'policy.conf'
+                original = 'PermitRootLogin prohibit-password\nPasswordAuthentication no\n'
+                config.write_text(original)
+                config.chmod(0o644)
+                path = shlex.quote(str(config))
+                mock = root / 'systemctl'
+                check = 'true' if allow_reload else f'! grep -qx "PermitRootLogin no" {path}'
+                mock.write_text(f'#!/bin/sh\nprintf "reload\\n" >> {shlex.quote(str(root / "calls"))}\n{check}\n')
+                mock.chmod(0o755)
+                script = cutover['ansible.builtin.shell'].replace(
+                    'config=/etc/ssh/sshd_config.d/00-golden-images.conf', f'config={path}').replace(
+                    '/etc/ssh/.golden-root-cutover.XXXXXX', shlex.quote(str(root / '.cutover.XXXXXX'))).replace(
+                    '/usr/sbin/sshd -t', 'true').replace('/usr/bin/systemctl', shlex.quote(str(mock)))
+                result = subprocess.run(['/bin/sh', '-c', script], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0 if allow_reload else 1, result.stderr)
+                self.assertEqual(config.read_text(), original.replace('prohibit-password', 'no') if allow_reload else original)
+                self.assertEqual(config.stat().st_mode & 0o777, 0o644)
+                self.assertEqual((root / 'calls').read_text().splitlines(), ['reload'] * (1 if allow_reload else 2))
+                self.assertFalse(list(root.glob('.cutover.*')))
+
 
 if __name__ == '__main__':
     unittest.main()
