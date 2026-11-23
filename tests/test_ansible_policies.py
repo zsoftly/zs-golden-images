@@ -476,7 +476,7 @@ class ImagePolicyTests(unittest.TestCase):
                 check = 'true' if allow_reload else f'! grep -qx "PermitRootLogin no" {path}'
                 mock.write_text(f'#!/bin/sh\nprintf "reload\\n" >> {shlex.quote(str(root / "calls"))}\n{check}\n')
                 mock.chmod(0o755)
-                script = cutover['ansible.builtin.shell'].replace(
+                script = cutover['ansible.builtin.raw'].replace(
                     'config=/etc/ssh/sshd_config.d/00-golden-images.conf', f'config={path}').replace(
                     '/etc/ssh/.golden-root-cutover.XXXXXX', shlex.quote(str(root / '.cutover.XXXXXX'))).replace(
                     '/usr/sbin/sshd -t', 'true').replace('/usr/bin/systemctl', shlex.quote(str(mock)))
