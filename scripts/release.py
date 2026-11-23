@@ -125,6 +125,9 @@ def inspect_artifact(path, target):
                         "Unsafe archive member path")
                 require(str(name) not in seen, "Duplicate archive member")
                 seen.add(str(name))
+                if name == PurePosixPath("."):
+                    require(member.isdir() and (member.uid, member.gid, member.mode) == (0, 0, 0o755),
+                            "LXC archive root must be a root-owned mode 0755 directory")
                 if str(name) in {"etc/os-release", "usr/lib/os-release"} and member.isfile():
                     os_release = True
                 if str(name) in {"etc/resolv.conf", "etc/resolv.conf.ORIG"}:
@@ -139,6 +142,7 @@ def inspect_artifact(path, target):
                         "Image contains an SSH host key")
                 require(str(name) not in {"root/.ssh/authorized_keys", "var/ossec/etc/client.keys"},
                         "Image contains an access or enrollment identity")
+        require("." in seen, "LXC archive lacks its root directory entry")
         require(not required and os_release, "Archive lacks required OS/image identity files")
 
 

@@ -129,7 +129,9 @@
     mode: '0440'
     content: |
       Defaults use_pty
+      {% if golden_profile == 'debian-13' %}
       Defaults logfile="/var/log/sudo.log"
+      {% endif %}
       Defaults timestamp_timeout=5
     validate: /usr/sbin/visudo -cf %s
 - name: Create persistent journal policy directory

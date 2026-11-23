@@ -108,6 +108,8 @@ Ansible owns the VM datasource list: `CloudStack`, `ConfigDrive`, and `None`. Th
 
 The offline hardening role writes an explicit `offline-l1-subset` record. It configures key-based SSH, local password policy, root password locking, default permissions, account-file permissions, core-dump limits, and VM-only kernel settings. Filesystem layout, firewall policy, audit rules, bootloader policy, account lockout, and full benchmark mapping still require separate coverage. Password-history enforcement is configured but requires runtime verification. Container host-owned controls are recorded as such. This baseline does not claim a complete CIS Level 1 implementation.
 
+Debian records sudo invocations in `/var/log/sudo.log`. Ubuntu's `sudo-rs` sends them to syslog.
+
 In-image provenance and hardening records use `acceptance_source: signed-release-metadata`; release acceptance is recorded outside the immutable image. The hardening record's `cis_complete: false` describes the offline subset's coverage. It does not override a later signed release assessment. Candidate manifests and experimental audit reports still block promotion until their separate acceptance gates pass.
 
 Cleanup captures package versions, removes build identities and temporary state, resets machine identity, and prepares unique SSH host keys on first boot. It removes inherited resolver contents and DIB's resolver backup. VM cleanup also removes `/etc/.resolv.conf.systemd-resolved.bak` and `/run/systemd/resolve/stub-resolv.conf`, which package installation can populate with builder DNS settings. VM artifacts retain a resolver symlink to the stub generated at runtime; LXC archives contain an empty regular `/etc/resolv.conf` for Proxmox provisioning. Resolver generation and DNS after provisioning still require live acceptance. The adapter removes `/root/.ansible` after Ansible finishes its cleanup phase.
@@ -152,7 +154,7 @@ These tests do not import templates, enable Actions, or establish CloudStack or 
 python3 scripts/release.py inspect "$CANDIDATE"
 ```
 
-This validates artifact checksums and format-specific structure, not successful boot or compatibility. VM inspection requires `qemu-img`. LXC inspection checks the rootfs archive and captured identities, requires an empty regular `etc/resolv.conf`, and rejects a nonempty or nonregular `etc/resolv.conf.ORIG` if present.
+This validates artifact checksums and format-specific structure, not successful boot or compatibility. VM inspection requires `qemu-img`. LXC inspection checks the rootfs archive and captured identities. It requires the archive root to be root-owned and mode `0755` so guest users can traverse `/`. It also requires an empty regular `etc/resolv.conf` and rejects a nonempty or nonregular `etc/resolv.conf.ORIG` when present.
 
 An authorized reviewer must sign a private approval JSON after reviewing real acceptance evidence. The approval uses `schema_version: 1`, the exact `candidate_sha256` and `artifact_sha256`, an unexpired `expires` date, and an `evidence` array of `{path, sha256}` entries. Each named check must have `status: passed` and an `evidence` array referring to those hashes. Evidence paths resolve relative to the approval file.
 
