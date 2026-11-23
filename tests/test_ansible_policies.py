@@ -126,24 +126,28 @@ class ImagePolicyTests(unittest.TestCase):
             self.assertNotIn('Check-Valid-Until: no', result)
 
     def test_vm_dns_and_metadata_have_one_runtime_owner(self):
-        data = task('image_configure', 'Configure metadata sources for CloudStack')['ansible.builtin.copy']
-        config = yaml.safe_load(data['content'])
-        self.assertEqual(config['datasource_list'], ['CloudStack', 'ConfigDrive', 'None'])
-        self.assertEqual(config['system_info']['network'],
-                         {'renderers': ['netplan'], 'activators': ['netplan']})
+        data = task('image_configure', 'Configure the platform cloud-init datasource')['ansible.builtin.copy']
+        env = jinja2.Environment(undefined=jinja2.StrictUndefined)
+        for target, platform, datasources in (
+                ('cloudstack-kvm', 'cloudstack', ['CloudStack', 'ConfigDrive', 'None']),
+                ('proxmox-kvm', 'proxmox', ['NoCloud', 'None'])):
+            config = yaml.safe_load(env.from_string(data['content']).render(golden_target=target))
+            self.assertEqual(config['datasource_list'], datasources)
+            self.assertEqual(config['system_info']['network'], {'renderers': ['netplan'], 'activators': ['netplan']})
+            self.assertTrue(env.from_string(data['dest']).render(golden_target=target).endswith(f'90-zs-{platform}.cfg'))
         deps = (ROOT / 'builders/diskimage-builder/elements/zs-configure/element-deps').read_text().splitlines()
         self.assertIn('cloud-init', deps)
         self.assertNotIn('cloud-init-datasources', deps)
         env = jinja2.Environment(undefined=jinja2.StrictUndefined)
         package_template = task('image_configure', 'Install shared image packages without starting services')['ansible.builtin.apt']['name']
         service_template = task('image_configure', 'Enable services for the next guest boot only')['loop']
-        for target in ('cloudstack-kvm', 'proxmox-lxc'):
+        for target in ('cloudstack-kvm', 'proxmox-kvm', 'proxmox-lxc'):
             packages = yaml.safe_load(env.from_string(package_template).render(golden_target=target))
             services = yaml.safe_load(env.from_string(service_template).render(golden_target=target))
             for package in ('netplan.io', 'systemd-resolved'):
-                self.assertEqual(package in packages, target == 'cloudstack-kvm')
+                self.assertEqual(package in packages, target != 'proxmox-lxc')
             for service in ('systemd-networkd', 'systemd-resolved'):
-                self.assertEqual(service in services, target == 'cloudstack-kvm')
+                self.assertEqual(service in services, target != 'proxmox-lxc')
 
     def test_build_dns_is_preserved_privately_around_package_installation(self):
         names = [item['name'] for item in tasks('image_configure')]
@@ -152,7 +156,7 @@ class ImagePolicyTests(unittest.TestCase):
         self.assertTrue(preserve['no_log'])
         self.assertTrue(restore['no_log'])
         self.assertFalse(restore['ansible.builtin.copy']['follow'])
-        self.assertEqual(preserve['when'], "golden_target == 'cloudstack-kvm'")
+        self.assertEqual(preserve['when'], "golden_target != 'proxmox-lxc'")
         self.assertEqual(restore['when'], preserve['when'])
         install = names.index('Install shared image packages without starting services')
         self.assertLess(names.index(preserve['name']), install)
@@ -161,7 +165,7 @@ class ImagePolicyTests(unittest.TestCase):
     def test_cleanup_removes_private_resolvers_without_following_symlinks(self):
         item = task('image_cleanup', 'Remove inherited resolver configuration after package operations')
         self.assertEqual(tasks('image_cleanup')[-1]['name'], item['name'])
-        for target in ('cloudstack-kvm', 'proxmox-lxc'):
+        for target in ('cloudstack-kvm', 'proxmox-kvm', 'proxmox-lxc'):
             with self.subTest(target=target), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 etc = root / 'etc'
@@ -172,7 +176,7 @@ class ImagePolicyTests(unittest.TestCase):
                 private.write_text('nameserver 192.0.2.1\nsearch private.invalid\n')
                 (etc / 'resolv.conf').symlink_to(private)
                 (etc / 'resolv.conf.ORIG').write_text(private.read_text())
-                if target == 'cloudstack-kvm':
+                if target != 'proxmox-lxc':
                     (etc / '.resolv.conf.systemd-resolved.bak').write_text(private.read_text())
                     (run / 'systemd' / 'resolve' / 'stub-resolv.conf').write_text(private.read_text())
                 mountpoint = root / 'mountpoint'
@@ -185,7 +189,7 @@ class ImagePolicyTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(private.read_text(), 'nameserver 192.0.2.1\nsearch private.invalid\n')
                 self.assertFalse((etc / 'resolv.conf.ORIG').exists())
-                if target == 'cloudstack-kvm':
+                if target != 'proxmox-lxc':
                     self.assertEqual(os.readlink(etc / 'resolv.conf'), '../run/systemd/resolve/stub-resolv.conf')
                     self.assertFalse((etc / '.resolv.conf.systemd-resolved.bak').exists())
                     self.assertFalse((run / 'systemd' / 'resolve' / 'stub-resolv.conf').exists())

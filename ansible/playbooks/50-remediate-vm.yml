@@ -75,7 +75,7 @@
       ansible.builtin.assert:
         that:
           - (golden_candidate_provenance.content | b64decode | from_json).profile == golden_profile
-          - (golden_candidate_provenance.content | b64decode | from_json).target == 'cloudstack-kvm'
+          - (golden_candidate_provenance.content | b64decode | from_json).target in ['cloudstack-kvm', 'proxmox-kvm']
           - (golden_candidate_provenance.content | b64decode | from_json).acceptance_source == 'signed-release-metadata'
           - (golden_profile == 'debian-13' and ansible_facts.distribution == 'Debian' and ansible_facts.distribution_major_version == '13') or (golden_profile == 'ubuntu-26.04' and ansible_facts.distribution == 'Ubuntu' and ansible_facts.distribution_version == '26.04')
     - name: Apply reviewed per-control selections

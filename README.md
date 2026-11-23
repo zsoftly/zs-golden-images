@@ -1,6 +1,6 @@
 # zs-golden-images
 
-One image project for Debian 13 and Ubuntu 26.04 LTS, using OpenStack diskimage-builder for CloudStack/KVM disks and LXC distrobuilder for Proxmox LXC archives. Ansible provides shared operating-system configuration and target-specific hardening.
+Build Debian 13 and Ubuntu 26.04 LTS images for CloudStack and Proxmox. OpenStack diskimage-builder assembles VM disks for both platforms. LXC distrobuilder assembles Proxmox container archives. Ansible configures and hardens each target.
 
 The active pipeline targets a dedicated, isolated bare-metal builder and does not allocate production Proxmox capacity. The manual CI workflow separates preflight, build, inspection and native smoke testing. Each installation requires its own approved host, invocation permissions and live verification; a passing candidate pipeline does not approve publication or production templates.
 
@@ -11,6 +11,7 @@ The active pipeline targets a dedicated, isolated bare-metal builder and does no
 Upstream builders assemble the disk or root filesystem. Project scripts select inputs, call those tools and Ansible, record evidence, and enforce release gates. The repository does not implement another image-building engine.
 
 - `cloudstack-kvm`: a BIOS/MBR QCOW2 VM disk with cloud-init and VM-specific packages and controls.
+- `proxmox-kvm`: a BIOS/MBR QCOW2 VM disk with Proxmox NoCloud provisioning and the QEMU guest agent.
 - `proxmox-lxc`: a root filesystem archive with container-specific packages and exclusions. Use `rootfs.tar.xz` for Proxmox; the upstream companion metadata archive is not the Proxmox template.
 - `debian-13` and `ubuntu-26.04`: explicit profiles used throughout the pipeline, provenance, and acceptance evidence.
 
@@ -54,6 +55,7 @@ Set `SITE` to the absolute private input path. Validation checks inputs without 
 
 ```bash
 ./scripts/pipeline.sh validate debian-13 cloudstack-kvm "$SITE"
+./scripts/pipeline.sh validate debian-13 proxmox-kvm "$SITE"
 ./scripts/pipeline.sh validate debian-13 proxmox-lxc "$SITE"
 ```
 
@@ -70,7 +72,7 @@ The pipeline rechecks repository metadata, records source and builder inputs, an
 
 ## Development and operational boundary
 
-The optional [manual CI workflow](docs/manual-ci.md) runs preflight, build, inspect and native smoke jobs through a root-owned approval registry. Protected stage receipts permit retries without rebuilding a verified candidate. Installing its dispatcher does not grant runner privileges or enable Actions; the staged interface requires fleet review of all 16 exact commands before activation.
+The optional [manual CI workflow](docs/manual-ci.md) runs preflight, build, inspect and native smoke jobs through a root-owned approval registry. Protected stage receipts permit retries without rebuilding a verified candidate. The three-target dispatcher requires fleet review of all 24 exact commands before activation.
 
 Continue code, unit tests, static checks, Ansible roles, and setup documentation while infrastructure preparation is pending. The infrastructure owner supplies the dedicated server, private inventory, workspace filesystem, isolated network, and verified access. Obtain approval after that handoff before installing the builder or starting live image builds.
 
@@ -160,9 +162,10 @@ An authorized reviewer must sign a private approval JSON after reviewing real ac
 
 - Common checks: `boot`, `clone_identity`, `network`, `dns`, `time`, `ansible_idempotency`, `patching`, `reboot`, `workload`, `rollback`, `secret_scan`, `vulnerability_scan`, `cis_coverage`, `cis_remediation`, and `wazuh_readiness`.
 - CloudStack checks: `cloud_init`, `guest_agent`, and `cloudstack_compatibility`.
+- Proxmox VM checks: `cloud_init`, `guest_agent`, and `proxmox_compatibility`.
 - Proxmox LXC checks: `unprivileged_lxc`, `container_provisioning`, and `proxmox_compatibility`.
 - `vulnerability_scan` metadata: scanner `tool` and `version`, `database_sha256`, `database_updated` date, and `report_sha256` bound to the check's evidence. The current gate requires a database no older than seven days and integer `critical: 0` and `high: 0` counts.
-- Each item bound to `cis_coverage` must be a JSON object with `coverage: complete`, `raw_provenance: verified`, and `promotion_allowed: true`, regardless of its filename. List supporting manual artifacts separately and include their assessment in the complete coverage record.
+- `cis_coverage` must reference a reviewed Level 1 Server assessment for the exact image and target. See the [CIS evidence format](docs/level-1-release.md#cis-level-1-evidence).
 - `secret_scan` must inspect `/etc/resolv.conf`, `/etc/resolv.conf.ORIG`, `/etc/.resolv.conf.systemd-resolved.bak`, and `/run/systemd/resolve/stub-resolv.conf` for inherited nameservers and search domains, including inside VM disks that format inspection does not mount.
 
 Do not manufacture passing entries to exercise the release path. JSON evidence reporting incomplete coverage, unverified provenance, or blocked promotion prevents approval regardless of its filename or acceptance check. Text evidence carrying the audit adapter's matching blocked markers also prevents approval. Reviewers assess the evidence; the script verifies signatures, identities, hashes, required fields, and release policy. The existing experimental audit report alone cannot satisfy this gate.
@@ -179,7 +182,9 @@ python3 scripts/release.py verify "$RELEASE_DIR" --signer "$SIGNER" --gpg-home "
 
 Preparation copies the artifact and writes sanitized release metadata, `SHA256SUMS`, and a detached signature. Private raw audit and acceptance evidence are not included. Keep signing keys outside the source tree and images. Verify the independently trusted signer and checksums before every import, including rollback to an earlier approved version.
 
-Publication remains held. The optional publisher requires a private destination JSON with exactly `endpoint_url`, `bucket`, `prefix`, `region`, `canada_storage_approved: true`, and `conditional_writes_verified: true`. Infra must verify the endpoint's Canadian storage policy, conditional writes, object versioning, and checksum upload/readback support. These flags record verified prerequisites; they do not establish them. Credentials use the AWS CLI's approved external credential configuration, never JSON fields or URLs.
+Use [GitHub Releases](docs/level-1-release.md#github-releases) to distribute public image files. Stage a draft from the signed bundle, then publish the verified draft when approved. The release process runs outside the candidate builder.
+
+For private distribution, the S3 publisher requires a private destination JSON with `endpoint_url`, `bucket`, `prefix`, `region`, `canada_storage_approved: true`, and `conditional_writes_verified: true`. Infra verifies Canadian storage, conditional writes, object versioning, and checksum upload and readback before setting these flags. Configure credentials through the AWS CLI's approved credential provider.
 
 After separate release/publication approval, set `DESTINATION` to that private file:
 

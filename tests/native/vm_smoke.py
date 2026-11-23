@@ -77,17 +77,37 @@ def stop_qemu(proc):
             proc.wait(timeout=10)
 
 
-def cloud_identity(ssh, directory):
+def cloud_identity(ssh, directory, expected_datasource):
     cloud_status = json.loads(run([*ssh, 'cloud-init status --format json'], timeout=20).stdout)
     write_json(directory / 'cloud-init-status.json', cloud_status)
     datasource = cloud_status.get('datasource')
-    require(datasource == 'configdrive' and cloud_status.get('status') == 'done',
-            'ConfigDrive did not complete: ' + str(datasource))
+    require(datasource == expected_datasource and cloud_status.get('status') == 'done',
+            f'{expected_datasource} did not complete: {datasource}')
     platform = run([*ssh, 'cloud-id'], timeout=20).stdout.strip()
     return datasource, platform
 
 
-def test_clone(root, artifact, profile, number, port, site):
+def write_seed(directory, target, instance, hostname, mac, config):
+    seed = directory / 'seed'
+    if target == 'proxmox-kvm':
+        seed.mkdir()
+        write_json(seed / 'meta-data', {'instance-id': instance, 'local-hostname': hostname})
+        write_json(seed / 'network-config', {'version': 2, 'ethernets': {
+            'nic0': {'match': {'macaddress': mac}, 'dhcp4': True}}})
+        (seed / 'user-data').write_text('#cloud-config\n' + json.dumps(config) + '\n')
+        return 'CIDATA', 'nocloud'
+    configdrive = seed / 'openstack' / 'latest'
+    configdrive.mkdir(parents=True)
+    write_json(configdrive / 'meta_data.json', {'uuid': instance, 'name': hostname, 'hostname': hostname,
+                                               'meta': {'dsmode': 'local'}})
+    write_json(configdrive / 'network_data.json', {
+        'links': [{'id': 'nic0', 'type': 'phy', 'ethernet_mac_address': mac}],
+        'networks': [{'id': 'net0', 'type': 'ipv4_dhcp', 'link': 'nic0'}], 'services': []})
+    (configdrive / 'user_data').write_text('#cloud-config\n' + json.dumps(config) + '\n')
+    return 'config-2', 'configdrive'
+
+
+def test_clone(root, artifact, profile, target, number, port, site):
     directory = root / ('clone-' + str(number))
     directory.mkdir(mode=0o700)
     key = directory / 'admin-key'
@@ -96,20 +116,13 @@ def test_clone(root, artifact, profile, number, port, site):
     instance = str(uuid.uuid4())
     hostname = 'golden-smoke-' + str(number)
     mac = '52:54:00:' + ':'.join(f'{value:02x}' for value in secrets.token_bytes(3))
-    seed = directory / 'seed' / 'openstack' / 'latest'
-    seed.mkdir(parents=True)
-    write_json(seed / 'meta_data.json', {'uuid': instance, 'name': hostname, 'hostname': hostname,
-                                        'meta': {'dsmode': 'local'}})
-    write_json(seed / 'network_data.json', {
-        'links': [{'id': 'nic0', 'type': 'phy', 'ethernet_mac_address': mac}],
-        'networks': [{'id': 'net0', 'type': 'ipv4_dhcp', 'link': 'nic0'}], 'services': []})
     config = {'users': [{'name': USER, 'shell': '/bin/bash', 'lock_passwd': True,
                          'sudo': ['ALL=(ALL) NOPASSWD:ALL'], 'ssh_authorized_keys': [public_key]}],
               'disable_root': True, 'ssh_pwauth': False, 'package_update': False,
               'package_upgrade': False, 'manage_etc_hosts': True}
-    (seed / 'user_data').write_text('#cloud-config\n' + json.dumps(config) + '\n')
+    label, expected_datasource = write_seed(directory, target, instance, hostname, mac, config)
     iso = directory / 'configdrive.iso'
-    run(['xorriso', '-as', 'mkisofs', '-quiet', '-r', '-J', '-V', 'config-2', '-o', iso, directory / 'seed'], log=directory / 'iso.log')
+    run(['xorriso', '-as', 'mkisofs', '-quiet', '-r', '-J', '-V', label, '-o', iso, directory / 'seed'], log=directory / 'iso.log')
     overlay = directory / 'disk.qcow2'
     run(['qemu-img', 'create', '-f', 'qcow2', '-F', 'qcow2', '-b', artifact, overlay], log=directory / 'overlay.log')
     ga = directory / 'qga.sock'
@@ -129,7 +142,7 @@ def test_clone(root, artifact, profile, number, port, site):
         try:
             first = wait_for(proc, lambda: identity(ga))
             require(re.fullmatch('[0-9a-f]{32}', first['machine_id']), 'Invalid guest machine identity')
-            require(first['instance_id'] == instance, 'ConfigDrive instance identity not applied')
+            require(first['instance_id'] == instance, 'Cloud-init instance identity not applied')
             require(first['host_key'].startswith('ssh-ed25519 '), 'Unexpected guest host key')
             known = directory / 'known_hosts'
             known.write_text(f'[127.0.0.1]:{port} ' + ' '.join(first['host_key'].split()[:2]) + '\n')
@@ -148,12 +161,12 @@ def test_clone(root, artifact, profile, number, port, site):
                 'ansible_ssh_common_args': shlex.join(common)}}}}}}
             write_json(directory / 'inventory.json', inventory)
             settings = {'golden_runtime_approved': True, 'golden_profile': profile,
-                        'golden_target': 'cloudstack-kvm', 'golden_enrollment_policy': 'public'}
+                        'golden_target': target, 'golden_enrollment_policy': 'public'}
             write_json(directory / 'vars.json', settings)
             play = [site.tool_prefix / 'venv/bin/ansible-playbook', '-i', directory / 'inventory.json',
                     '-e', '@' + str(directory / 'vars.json'), site.project / 'ansible/playbooks/40-verify-runtime.yml']
             run(play, timeout=300, env=env, log=directory / 'runtime-first.log')
-            datasource, platform = cloud_identity(ssh, directory)
+            datasource, platform = cloud_identity(ssh, directory, expected_datasource)
             first = identity(ga)
             require(first['hostname'] == hostname and first['instance_id'] == instance, 'Instance metadata mismatch')
             write_json(directory / 'identity-first.json', first)
@@ -211,7 +224,8 @@ def main():
     require_runner_context(site.runner_service, args.ci_context, site, args.candidate)
     require(Path('/dev/kvm').is_char_device(), 'KVM device missing')
     candidate = json.loads(args.candidate.read_text())
-    require(candidate['target'] == 'cloudstack-kvm' and candidate['profile'] in ('debian-13', 'ubuntu-26.04'), 'Unsupported candidate')
+    require(candidate['target'] in ('cloudstack-kvm', 'proxmox-kvm') and candidate['profile'] in ('debian-13', 'ubuntu-26.04'),
+            'Unsupported candidate')
     artifact = (args.candidate.parent / candidate['artifact']['path']).absolute()
     require(artifact.is_relative_to(site.workspace) and artifact.resolve() == artifact and re.fullmatch(r'[A-Za-z0-9/_.-]+', str(artifact)),
             'Artifact must be a canonical protected workspace path without QEMU option separators')
@@ -228,7 +242,8 @@ def main():
               'status': 'failed'}
     try:
         run([site.tool_prefix / 'venv/bin/python', site.project / 'scripts/release.py', 'inspect', args.candidate], log=args.evidence_run / 'inspect.log')
-        clones = [test_clone(args.evidence_run, artifact, candidate['profile'], n, args.ssh_port, site) for n in (1, 2)]
+        clones = [test_clone(args.evidence_run, artifact, candidate['profile'], candidate['target'], n, args.ssh_port, site)
+                  for n in (1, 2)]
         require_unique(clones[0]['identity'], clones[1]['identity'], ('machine_id', 'host_key', 'instance_id'))
         report.update(status='passed', clones=clones, clone_uniqueness='passed')
     except BaseException as error:

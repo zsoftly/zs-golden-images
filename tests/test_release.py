@@ -35,14 +35,25 @@ class ReleaseTests(unittest.TestCase):
                      "inputs": {"snapshot": "fixture"}}
         self.write(self.candidate, self.data)
         self.evidence = self.root / "evidence.json"
-        self.write(self.evidence, {"fixture": "test-only", "coverage": "complete",
-                                   "raw_provenance": "verified", "promotion_allowed": True})
+        inventory = self.root / "inventory.json"
+        proof = self.root / "verified.txt"
+        benchmark = release.cis_benchmark(self.data["profile"])
+        self.write(inventory, {"benchmark": benchmark, "control_ids": ["fixture-control"]})
+        proof.write_text("Synthetic supporting evidence")
+        self.bound_cis_evidence = [{"path": path.name, "sha256": release.digest(path)}
+                                   for path in (inventory, proof)]
+        self.cis_report = {"coverage": "complete", "raw_provenance": "verified", "promotion_allowed": True,
+                           "benchmark": benchmark, "target": self.data["target"],
+                           "artifact_sha256": self.data["artifact"]["sha256"],
+                           "control_inventory_sha256": release.digest(inventory),
+                           "controls": {"fixture-control": {"status": "passed", "evidence_sha256": release.digest(proof)}}}
+        self.write(self.evidence, self.cis_report)
         evidence_hash = release.digest(self.evidence)
         today = datetime.datetime.now(datetime.timezone.utc).date()
         self.accepted = {
             "schema_version": 1, "candidate_sha256": release.digest(self.candidate),
             "artifact_sha256": release.digest(self.artifact), "expires": str(today),
-            "evidence": [{"path": "evidence.json", "sha256": evidence_hash}],
+            "evidence": [{"path": "evidence.json", "sha256": evidence_hash}, *self.bound_cis_evidence],
             "checks": {name: {"status": "passed", "evidence": [evidence_hash]}
                        for name in release.COMMON_CHECKS | release.TARGET_CHECKS["proxmox-lxc"]},
             "vulnerability_scan": {"tool": "fixture", "version": "1", "database_sha256": "b" * 64,
@@ -83,7 +94,7 @@ class ReleaseTests(unittest.TestCase):
         else:
             self.write(self.evidence, value)
         evidence_hash = release.digest(self.evidence)
-        self.accepted["evidence"] = [{"path": name, "sha256": evidence_hash}]
+        self.accepted["evidence"] = [{"path": name, "sha256": evidence_hash}, *self.bound_cis_evidence]
         for check in self.accepted["checks"].values():
             check["evidence"] = [evidence_hash]
         self.accepted["vulnerability_scan"]["report_sha256"] = evidence_hash
@@ -169,9 +180,30 @@ class ReleaseTests(unittest.TestCase):
                     self.check()
 
     def test_complete_cis_json_is_accepted_without_json_extension(self):
-        self.replace_evidence({"coverage": "complete", "raw_provenance": "verified",
-                               "promotion_allowed": True}, "reviewed-coverage.txt")
+        self.replace_evidence(self.cis_report, "reviewed-coverage.txt")
         self.assertEqual(self.check()[0]["target"], "proxmox-lxc")
+
+    def test_rejects_cis_report_for_wrong_image_or_benchmark(self):
+        for changes in ({"artifact_sha256": "b" * 64}, {"target": "proxmox-kvm"},
+                        {"benchmark": {**self.cis_report["benchmark"], "version": "0.1.0"}},
+                        {"benchmark": {**self.cis_report["benchmark"], "level": 2}}):
+            with self.subTest(changes=changes):
+                self.replace_evidence({**self.cis_report, **changes})
+                with self.assertRaisesRegex(ValueError, "pinned benchmark, target and image digest"):
+                    self.check()
+
+    def test_requires_result_and_supporting_evidence_for_every_control(self):
+        for controls, reason in (({}, "every reviewed control"),
+                                 ({"fixture-control": {"status": "failed"}}, "must pass"),
+                                 ({"fixture-control": {"status": "passed", "evidence_sha256": "f" * 64}},
+                                  "missing bound supporting evidence"),
+                                 ({"fixture-control": {"status": "host_inherited",
+                                                       "evidence_sha256": self.bound_cis_evidence[1]["sha256"]}},
+                                  "requires a rationale")):
+            with self.subTest(controls=controls):
+                self.replace_evidence({**self.cis_report, "controls": controls})
+                with self.assertRaisesRegex(ValueError, reason):
+                    self.check()
 
     def test_duplicate_keys_in_renamed_evidence_are_rejected(self):
         self.replace_evidence('{"coverage":"incomplete","coverage":"complete"}',

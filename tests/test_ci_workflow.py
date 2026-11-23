@@ -42,7 +42,7 @@ class WorkflowBoundary(unittest.TestCase):
         inputs = WORKFLOW['on']['workflow_dispatch']['inputs']
         self.assertEqual(set(inputs), {'profile', 'target'})
         self.assertEqual(inputs['profile']['options'], ['debian-13', 'ubuntu-26.04'])
-        self.assertEqual(inputs['target']['options'], ['cloudstack-kvm', 'proxmox-lxc'])
+        self.assertEqual(inputs['target']['options'], ['cloudstack-kvm', 'proxmox-kvm', 'proxmox-lxc'])
         self.assertEqual(WORKFLOW['permissions'], {'contents': 'read'})
         self.assertEqual(WORKFLOW['concurrency'], {'group': 'golden-image-candidate-${{ inputs.profile }}-${{ inputs.target }}', 'cancel-in-progress': 'false'})
         self.assertEqual(set(WORKFLOW['jobs']), {*STAGES, 'summary'})
@@ -76,10 +76,10 @@ class WorkflowBoundary(unittest.TestCase):
         self.assertEqual(summary['needs'], list(STAGES))
         self.assertIn('always()', summary['if'])
 
-    def test_all_sixteen_stage_pair_commands_use_literal_stage_and_quoted_inputs(self):
+    def test_all_stage_pair_commands_use_literal_stage_and_quoted_inputs(self):
         for stage in STAGES:
             for profile in ('debian-13', 'ubuntu-26.04'):
-                for target in ('cloudstack-kvm', 'proxmox-lxc'):
+                for target in ('cloudstack-kvm', 'proxmox-kvm', 'proxmox-lxc'):
                     with self.subTest(stage=stage, profile=profile, target=target):
                         result, output, call = self.execute_stage(stage, profile=profile, target=target)
                         self.assertEqual(result.returncode, 0, result.stderr)

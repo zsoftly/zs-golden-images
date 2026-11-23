@@ -384,10 +384,27 @@ class NativeGuestTests(unittest.TestCase):
                              SimpleNamespace(stdout='openstack\n')]
                 with self.subTest(datasource=datasource, status=status), patch.object(vm_smoke, 'run', side_effect=responses):
                     if accepted:
-                        self.assertEqual(vm_smoke.cloud_identity([], Path(directory)), ('configdrive', 'openstack'))
+                        self.assertEqual(vm_smoke.cloud_identity([], Path(directory), 'configdrive'), ('configdrive', 'openstack'))
                     else:
-                        with self.assertRaisesRegex(RuntimeError, 'ConfigDrive did not complete'):
-                            vm_smoke.cloud_identity([], Path(directory))
+                        with self.assertRaisesRegex(RuntimeError, 'configdrive did not complete'):
+                            vm_smoke.cloud_identity([], Path(directory), 'configdrive')
+
+    def test_proxmox_vm_seed_uses_local_nocloud_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            mac = '52:54:00:00:00:01'
+            self.assertEqual(vm_smoke.write_seed(root, 'proxmox-kvm', 'id-1', 'clone-a', mac, {}),
+                             ('CIDATA', 'nocloud'))
+            seed = root / 'seed'
+            self.assertEqual({item.name for item in seed.iterdir()}, {'user-data', 'meta-data', 'network-config'})
+            self.assertEqual(json.loads((seed / 'meta-data').read_text()),
+                             {'instance-id': 'id-1', 'local-hostname': 'clone-a'})
+            network = json.loads((seed / 'network-config').read_text())['ethernets']['nic0']
+            self.assertEqual(network, {'match': {'macaddress': mac}, 'dhcp4': True})
+            responses = [SimpleNamespace(stdout='{"datasource":"nocloud","status":"done"}'),
+                         SimpleNamespace(stdout='nocloud\n')]
+            with patch.object(vm_smoke, 'run', side_effect=responses):
+                self.assertEqual(vm_smoke.cloud_identity([], root, 'nocloud'), ('nocloud', 'nocloud'))
 
     def test_qga_execution_timeout_is_bounded(self):
         with patch.object(vm_smoke, 'qga', side_effect=[{'pid': 12}, {'exited': False}]), \
@@ -433,7 +450,7 @@ class NativeGuestTests(unittest.TestCase):
                     patch.object(vm_smoke.subprocess, 'Popen', return_value=process) as popen, \
                     patch.object(vm_smoke, 'wait_for', side_effect=RuntimeError('guest failed')):
                 with self.assertRaisesRegex(RuntimeError, 'guest failed'):
-                    vm_smoke.test_clone(root, root / 'candidate.qcow2', 'debian-13', 1, 22280, site)
+                    vm_smoke.test_clone(root, root / 'candidate.qcow2', 'debian-13', 'cloudstack-kvm', 1, 22280, site)
             process.terminate.assert_called_once()
             process.wait.assert_called_once()
             argv = popen.call_args.args[0]

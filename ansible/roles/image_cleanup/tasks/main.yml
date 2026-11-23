@@ -16,7 +16,7 @@
 - name: Clear cloud-init capture state without waiting for a boot
   ansible.builtin.command: cloud-init clean --logs --seed --machine-id --configs network
   changed_when: true
-  when: golden_target == 'cloudstack-kvm'
+  when: golden_target != 'proxmox-lxc'
 - name: Reset machine identity for first boot
   ansible.builtin.copy:
     dest: /etc/machine-id
@@ -138,7 +138,7 @@
     test ! -L /etc
     if mountpoint -q /etc; then exit 1; fi
     set -- /etc/resolv.conf /etc/resolv.conf.ORIG
-    if [ "$GOLDEN_TARGET" = cloudstack-kvm ]; then
+    if [ "$GOLDEN_TARGET" != proxmox-lxc ]; then
       for parent in /run /run/systemd /run/systemd/resolve; do
         test ! -L "$parent"
         if mountpoint -q "$parent"; then exit 1; fi
@@ -153,7 +153,7 @@
       rm -f "$path"
     done
     # DIB honors a final resolver symlink and removes its saved .ORIG file.
-    if [ "$GOLDEN_TARGET" = cloudstack-kvm ]; then
+    if [ "$GOLDEN_TARGET" != proxmox-lxc ]; then
       ln -s ../run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
     else
       install -m 0644 /dev/null /etc/resolv.conf

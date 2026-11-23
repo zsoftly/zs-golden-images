@@ -28,7 +28,7 @@ class DispatcherBoundary(unittest.TestCase):
 
     def test_only_sixteen_exact_stage_arguments_are_accepted(self):
         for profile in ('debian-13', 'ubuntu-26.04'):
-            for target in ('cloudstack-kvm', 'proxmox-lxc'):
+            for target in ('cloudstack-kvm', 'proxmox-kvm', 'proxmox-lxc'):
                 for stage in DISPATCH.STAGES:
                     self.assertEqual(DISPATCH.arguments([stage, profile, target]), (stage, profile, target))
         for args in ([], [*self.request], ['publish', *self.request], ['build', *self.request, 'extra'], ['build', 'debian-13;id', 'cloudstack-kvm']):
@@ -380,7 +380,7 @@ class SmokeStageAdapter(unittest.TestCase):
             def logged(argv, log, timeout, expected=0):
                 # Consume the actual native helper CLI, including its output destination.
                 args = list(map(str, argv))
-                helper = str(REPO / 'tests/native' / ('vm_smoke.py' if target == 'cloudstack-kvm' else 'lxc_smoke.py'))
+                helper = str(REPO / 'tests/native' / ('vm_smoke.py' if target != 'proxmox-lxc' else 'lxc_smoke.py'))
                 self.assertIn(helper, args)
                 self.assertEqual(args[args.index('--site') + 1], str(site))
                 context = json.loads(Path(args[args.index('--ci-context') + 1]).read_text())
@@ -397,7 +397,7 @@ class SmokeStageAdapter(unittest.TestCase):
                 output.mkdir(parents=True)
                 report = {'status': 'passed', 'original_artifact_unchanged': True,
                           **bound, 'test_source_commit': approval['source_commit']}
-                if target == 'cloudstack-kvm':
+                if target != 'proxmox-lxc':
                     self.assertNotIn('--property=Delegate=yes', args)
                     report.update(scope='native-kvm-smoke-only', clone_uniqueness='passed',
                                   clones=[{'reboot_persistence': 'passed'}, {}])
@@ -426,10 +426,11 @@ class SmokeStageAdapter(unittest.TestCase):
                 result = DISPATCH.smoke_stage(REPO, evidence, name, guard, 'd' * 64, approval,
                                               candidate, bound, native, settings, common)
             self.assertEqual(result, reports)
-            self.assertEqual(commands.call_count, 1 if target == 'cloudstack-kvm' else 2)
+            self.assertEqual(commands.call_count, 1 if target != 'proxmox-lxc' else 2)
 
     def test_kvm_consumes_two_clone_report_from_bound_private_command(self):
         self.exercise('cloudstack-kvm')
+        self.exercise('proxmox-kvm')
 
     def test_kvm_rejects_wrong_artifact_and_incomplete_reboot_or_clone_evidence(self):
         for change in ({'artifact_sha256': 'f' * 64}, {'clones': [{}, {}]},
@@ -438,7 +439,7 @@ class SmokeStageAdapter(unittest.TestCase):
                 self.exercise('cloudstack-kvm', lambda report, number: report.update(change))
 
     def test_native_reports_require_candidate_source_and_unchanged_artifact(self):
-        for target in ('cloudstack-kvm', 'proxmox-lxc'):
+        for target in ('cloudstack-kvm', 'proxmox-kvm', 'proxmox-lxc'):
             for change in ({'candidate_sha256': 'f' * 64}, {'test_source_commit': 'f' * 40},
                            {'status': 'failed'}, {'original_artifact_unchanged': False}):
                 with self.subTest(target=target, change=change), self.assertRaisesRegex(ValueError, 'binding or result mismatch'):

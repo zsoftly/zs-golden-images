@@ -74,6 +74,25 @@ class CollectionIntegrity(unittest.TestCase):
 
 
 class NativeBuilderPolicy(unittest.TestCase):
+    def test_dib_hooks_pass_the_selected_vm_target_to_each_phase(self):
+        element = REPO / 'builders/diskimage-builder/elements/zs-configure'
+        hooks = ('post-root.d/90-zs-configure', 'cleanup.d/99-zs-cleanup')
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            adapter = work / 'scripts/configure-rootfs.sh'
+            adapter.parent.mkdir()
+            adapter.write_text('#!/bin/sh\nprintf "%s\n" "$*"\n')
+            adapter.chmod(0o755)
+            for target in ('cloudstack-kvm', 'proxmox-kvm'):
+                with self.subTest(target=target):
+                    env = dict(os.environ, ZS_SOURCE=directory, ZS_PROFILE='debian-13', ZS_TARGET=target,
+                               TMP_MOUNT_PATH='/test/rootfs', ZS_METADATA='/test/metadata.json')
+                    output = ''.join(subprocess.check_output(['bash', element / hook], env=env, text=True)
+                                     for hook in hooks)
+                    self.assertEqual(output.splitlines(), [
+                        f'{phase} debian-13 {target} /test/rootfs /test/metadata.json'
+                        for phase in ('configure', 'harden', 'cleanup')])
+
     def test_shared_ansible_adapter_scopes_utf8_to_child_under_c_locale(self):
         source = (REPO / "scripts/configure-rootfs.sh").read_text()
         invocation = next(line for line in source.splitlines() if '/venv/bin/ansible-playbook -i ' in line)
@@ -87,7 +106,7 @@ class NativeBuilderPolicy(unittest.TestCase):
             probe.chmod(0o755)
             invocation = invocation.replace('/opt/zs-golden-images/venv/bin/ansible-playbook', str(probe))
             for profile in ("debian-13", "ubuntu-26.04"):
-                for target in ("cloudstack-kvm", "proxmox-lxc"):
+                for target in ("cloudstack-kvm", "proxmox-kvm", "proxmox-lxc"):
                     for phase in ("configure", "harden", "cleanup"):
                         with self.subTest(profile=profile, target=target, phase=phase):
                             command = ('set -euo pipefail\nrepo=$1; state=$1; phase=$2; profile=$3; target=$4\n'
@@ -106,12 +125,14 @@ class NativeBuilderPolicy(unittest.TestCase):
         # Exercise the pipeline's actual preflight against sudo implementations
         # that preserve or discard ARCH, without privilege changes or DIB.
         source = (REPO / "scripts/pipeline.sh").read_text()
-        start = source.index('if [[ "$target" == cloudstack-kvm ]]; then', source.index('epoch=$(jq'))
+        start = source.index('if [[ "$target" != proxmox-lxc ]]; then', source.index('epoch=$(jq'))
         body = source[start:source.index('common_env=(', start)]
         for classic, preserves, target, success in (
             (True, False, "cloudstack-kvm", True),
             (False, True, "cloudstack-kvm", True),
             (False, False, "cloudstack-kvm", False),
+            (True, False, "proxmox-kvm", True),
+            (False, False, "proxmox-kvm", False),
             (False, False, "proxmox-lxc", True),
         ):
             with self.subTest(classic=classic, preserves=preserves, target=target):
@@ -130,7 +151,7 @@ class NativeBuilderPolicy(unittest.TestCase):
                     result = subprocess.run(["bash", "-c", runner, "sudo-test", str(run), target], text=True, capture_output=True)
                     self.assertEqual(result.returncode == 0, success, result.stderr)
                     self.assertEqual((binaries / "sudo").read_bytes(), original)
-                    if target == "cloudstack-kvm":
+                    if target != "proxmox-lxc":
                         self.assertEqual((run / "host-bin/sudo").resolve(), (binaries / ("sudo.ws" if classic else "sudo")).resolve())
                     else:
                         self.assertFalse((run / "host-bin").exists())

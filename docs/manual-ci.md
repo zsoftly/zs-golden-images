@@ -18,26 +18,34 @@ Workflow concurrency is scoped to profile and target and does not cancel an acti
 
 ## Invocation grant and activation
 
-This staged interface requires a reviewed dispatcher redeployment and a fleet-owned sudo grant update. The earlier two-argument dispatcher grant does not authorize these commands. Verify the new installed dispatcher hash and exact source revision before activation; installing repository code alone does not update fleet permissions.
+The Proxmox VM target requires a reviewed dispatcher redeployment and a fleet-owned sudo grant update. Verify the installed dispatcher hash and exact source revision before activation. The previous two-target grant does not allow the Proxmox VM commands.
 
-Allow only these 16 complete commands, without wildcards:
+The fleet grant lists these 24 exact commands without wildcards.
 
 ```text
 /opt/zs-golden-images/bin/dispatch-candidate preflight debian-13 cloudstack-kvm
+/opt/zs-golden-images/bin/dispatch-candidate preflight debian-13 proxmox-kvm
 /opt/zs-golden-images/bin/dispatch-candidate preflight debian-13 proxmox-lxc
 /opt/zs-golden-images/bin/dispatch-candidate preflight ubuntu-26.04 cloudstack-kvm
+/opt/zs-golden-images/bin/dispatch-candidate preflight ubuntu-26.04 proxmox-kvm
 /opt/zs-golden-images/bin/dispatch-candidate preflight ubuntu-26.04 proxmox-lxc
 /opt/zs-golden-images/bin/dispatch-candidate build debian-13 cloudstack-kvm
+/opt/zs-golden-images/bin/dispatch-candidate build debian-13 proxmox-kvm
 /opt/zs-golden-images/bin/dispatch-candidate build debian-13 proxmox-lxc
 /opt/zs-golden-images/bin/dispatch-candidate build ubuntu-26.04 cloudstack-kvm
+/opt/zs-golden-images/bin/dispatch-candidate build ubuntu-26.04 proxmox-kvm
 /opt/zs-golden-images/bin/dispatch-candidate build ubuntu-26.04 proxmox-lxc
 /opt/zs-golden-images/bin/dispatch-candidate inspect debian-13 cloudstack-kvm
+/opt/zs-golden-images/bin/dispatch-candidate inspect debian-13 proxmox-kvm
 /opt/zs-golden-images/bin/dispatch-candidate inspect debian-13 proxmox-lxc
 /opt/zs-golden-images/bin/dispatch-candidate inspect ubuntu-26.04 cloudstack-kvm
+/opt/zs-golden-images/bin/dispatch-candidate inspect ubuntu-26.04 proxmox-kvm
 /opt/zs-golden-images/bin/dispatch-candidate inspect ubuntu-26.04 proxmox-lxc
 /opt/zs-golden-images/bin/dispatch-candidate smoke debian-13 cloudstack-kvm
+/opt/zs-golden-images/bin/dispatch-candidate smoke debian-13 proxmox-kvm
 /opt/zs-golden-images/bin/dispatch-candidate smoke debian-13 proxmox-lxc
 /opt/zs-golden-images/bin/dispatch-candidate smoke ubuntu-26.04 cloudstack-kvm
+/opt/zs-golden-images/bin/dispatch-candidate smoke ubuntu-26.04 proxmox-kvm
 /opt/zs-golden-images/bin/dispatch-candidate smoke ubuntu-26.04 proxmox-lxc
 ```
 
