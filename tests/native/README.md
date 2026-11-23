@@ -51,7 +51,7 @@ The archive is fully checked before extraction. Absolute or traversing member na
 
 Explicit `lxc.net.0.type=empty` creates a loopback-only network namespace. The helper verifies that namespace and the actual `/proc` UID/GID maps. It bootstraps a temporary root key, uses `45-provision-lxc-admin.yml` to verify a non-root administrator before disabling root SSH, and runs `40-verify-runtime.yml` before and after stop/start. The controller enters only the container's network namespace for loopback SSH, retaining its private host-side inventory and keys. Cleanup stops the container and removes its private bind mount; extracted evidence remains available for inspection.
 
-Run a second invocation with a fresh evidence directory and `--compare-report "$PREVIOUS_REPORT"`, pointing to the first successful `smoke-report.json`. The prior report must cover the same unchanged artifact and a stopped container. The second invocation additionally requires distinct machine IDs, host keys and hostnames. A single-clone report explicitly leaves uniqueness untested.
+The smoke helper sets the assigned hostname in each disposable clone before boot. The image archive keeps its generic hostname. Run a second invocation with a fresh evidence directory and `--compare-report "$PREVIOUS_REPORT"`, pointing to the first successful `smoke-report.json`. The prior report must cover the same unchanged artifact and a stopped container. The second invocation additionally requires distinct machine IDs, host keys and hostnames. A single-clone report explicitly leaves uniqueness untested.
 
 ## Evidence limits and offline tests
 

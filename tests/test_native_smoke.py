@@ -123,6 +123,26 @@ class NativeSiteTests(unittest.TestCase):
 
 
 class LxcRuntimePathTests(unittest.TestCase):
+    def test_seed_hostname_replaces_only_the_disposable_clone_entry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            neutral = root / 'neutral'
+            neutral.write_text('localhost\n')
+            for clone, name in enumerate(('golden-smoke-1111', 'golden-smoke-2222')):
+                etc = root / str(clone) / 'etc'
+                etc.mkdir(parents=True)
+                hostname = etc / 'hostname'
+                hostname.symlink_to(neutral)
+                with patch.object(lxc_smoke.os, 'fchown') as assign_owner:
+                    lxc_smoke.seed_hostname(etc.parent, name, 1000000)
+                assign_owner.assert_called_once()
+                self.assertEqual(assign_owner.call_args.args[1:], (1000000, 1000000))
+                self.assertFalse(hostname.is_symlink())
+                self.assertEqual(hostname.read_text(), name + '\n')
+                self.assertEqual(hostname.stat().st_mode & 0o777, 0o644)
+                self.assertEqual(list(etc.iterdir()), [hostname])
+            self.assertEqual(neutral.read_text(), 'localhost\n')
+
     def test_start_and_stop_use_private_mount_alias(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
@@ -153,6 +173,7 @@ class LxcRuntimePathTests(unittest.TestCase):
             with (patch.object(lxc_smoke, 'Path', path), patch.object(lxc_smoke, 'load_site', return_value=site),
                   patch.object(lxc_smoke, 'protected'), patch.object(lxc_smoke, 'require_runner_context'),
                   patch.object(lxc_smoke, 'unused_id_range'), patch.object(lxc_smoke, 'extract'),
+                  patch.object(lxc_smoke, 'seed_hostname'),
                   patch.object(lxc_smoke, 'run', side_effect=run), patch.object(lxc_smoke.shutil, 'which', return_value=None),
                   patch.object(lxc_smoke, 'os', wraps=os) as local_os, patch.object(common.fcntl, 'flock'),
                   patch.object(lxc_smoke.subprocess, 'Popen') as popen,
